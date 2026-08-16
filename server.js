@@ -146,10 +146,14 @@ async function saveVideos(items, source, cfg) {
 
 // ---------------------------------------------------------------- 발굴 지표
 //
-// 발굴점수 = 배율 × 침투력 × (1 + 참여율/ENGAGE_DIVISOR)
-// 상수는 여기서 조정한다.
+// 발굴점수 = log(1+배율) × log(1+침투력) × (1 + 참여율/ENGAGE_DIVISOR)
+//
+// 곱셈 그대로 쓰면 배율과 침투력이 같은 방향으로 커지는 채널(구독자 대비 조회수가
+// 폭발하는 쇼츠 채널)에서 점수가 제곱으로 튀어 한 채널이 목록을 독점한다.
+// 로그로 완충한다. 상수는 여기서 조정한다.
 const METRIC = {
   ENGAGE_DIVISOR: 5,      // 참여율이 점수에 기여하는 정도 (클수록 영향 작아짐)
+  PER_CHANNEL_CAP: 3,     // 발굴 목록에서 한 채널이 차지할 수 있는 최대 개수
   COMMENT_WEIGHT: 3,      // 댓글 1개를 좋아요 몇 개로 볼지
   DEAD_CHANNEL: 0.05,     // 채널활력이 이 아래면 ⚠️ (죽은 채널의 과거 영광)
   HOT_ENGAGE_PCTL: 0.75,  // 참여율 상위 25% 에 💬 진한반응
@@ -170,7 +174,10 @@ function deriveMetrics(v, channel) {
   const multiple = Number(v.multiple ?? 0)
 
   // 구독자 수를 아직 모르면 침투력을 1로 두어 배율·참여율만으로 점수를 낸다
-  const digScore = multiple * (reach ?? 1) * (1 + engage / METRIC.ENGAGE_DIVISOR)
+  const digScore =
+    Math.log(1 + Math.max(multiple, 0)) *
+    Math.log(1 + Math.max(reach ?? 1, 0)) *
+    (1 + engage / METRIC.ENGAGE_DIVISOR)
 
   return {
     reach: reach == null ? null : Number(reach.toFixed(2)),
@@ -563,6 +570,56 @@ async function resolveChannelId(input) {
   return null
 }
 
+// ---------------------------------------------------------------- 키워드 추출
+
+// 제목에서 검색에 쓸 만한 핵심어를 뽑는다. 형태소 분석기 없이 조사/불용어만 걷어낸다.
+const PARTICLES = /(은|는|이|가|을|를|의|에|에서|에게|으로|로|와|과|도|만|까지|부터|보다|처럼|라고|이라고|한테|께서|이나|나|든지|조차|마저)$/
+const STOPWORDS = new Set([
+  '그', '이', '저', '것', '수', '등', '및', '더', '왜', '어떻게', '무엇', '정말', '진짜',
+  '가장', '너무', '아주', '다시', '지금', '오늘', '우리', '당신', '사람', '이유', '방법',
+  '영상', '공식', '풀버전', '하이라이트', '레전드', '모음', 'shorts', 'the', 'a', 'of', 'to'
+])
+
+function extractKeywords(title) {
+  const cleaned = String(title ?? '')
+    .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ') // 이모지
+    .replace(/[[\]()（）{}<>|·・…"'"'`~!?.,:;#@*/\\_+=-]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+
+  const words = cleaned.split(' ')
+    .map((w) => w.replace(PARTICLES, ''))
+    .filter((w) => w.length >= 2 && !STOPWORDS.has(w.toLowerCase()) && !/^\d+$/.test(w))
+
+  if (words.length === 0) return []
+
+  // 2어절 명사구를 우선 후보로, 그다음 단어 단위
+  const phrases = []
+  for (let i = 0; i < words.length - 1; i++) phrases.push(`${words[i]} ${words[i + 1]}`)
+
+  return [...new Set([...phrases.slice(0, 3), ...words.slice(0, 5)])]
+}
+
+async function relatedFromDb(keyword, excludeId) {
+  const term = String(keyword ?? '').trim()
+  if (!term) return []
+
+  const { data, error } = await supabase
+    .from('yt_videos')
+    .select('*')
+    .ilike('title', `%${term}%`)
+    .gte('score', 0)
+    .limit(200)
+  if (error) throw error
+
+  const chans = await channelMap()
+  return (data ?? [])
+    .filter((v) => v.video_id !== excludeId)
+    .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+    .sort((a, b) => b.dig_score - a.dig_score)
+    .slice(0, 10)
+}
+
 // ---------------------------------------------------------------- 서버
 
 const app = express()
@@ -685,7 +742,18 @@ app.get('/api/dig', requireAuth, async (req, res) => {
     }
     rows.sort(SORTS[req.query.sort] ?? SORTS.dig)
 
-    res.json(rows.slice(0, 80))
+    // 한 채널이 목록을 독점하지 않게 상한을 둔다.
+    // 특정 채널을 지정해 보는 중이라면 상한은 의미가 없으므로 푼다.
+    let out = rows
+    if (channel === 'all') {
+      const seen = {}
+      out = rows.filter((v) => {
+        const n = (seen[v.channel_id] = (seen[v.channel_id] ?? 0) + 1)
+        return n <= METRIC.PER_CHANNEL_CAP
+      })
+    }
+
+    res.json(out.slice(0, 80))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -740,6 +808,88 @@ app.post('/api/settings/trending', requireAuth, async (req, res) => {
       if (error) throw error
     }
     res.json(await readSettings())
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ⭐ 즐겨찾기
+app.post('/api/star', requireAuth, async (req, res) => {
+  try {
+    const { video_id, starred } = req.body ?? {}
+    if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
+    const { error } = await supabase
+      .from('yt_videos')
+      .update({ starred: !!starred, starred_at: starred ? new Date().toISOString() : null })
+      .eq('video_id', video_id)
+    if (error) throw error
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.get('/api/starred', requireAuth, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from('yt_videos')
+      .select('*')
+      .eq('starred', true)
+      .order('starred_at', { ascending: false })
+      .limit(200)
+    if (error) throw error
+    const chans = await channelMap()
+    res.json((data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) })))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 🔎 관련 주제 — DB 안에서만 찾는다 (할당량 0)
+app.get('/api/related', requireAuth, async (req, res) => {
+  try {
+    const { video_id, q } = req.query
+    let keywords = []
+    let keyword = q
+
+    if (video_id) {
+      const { data } = await supabase
+        .from('yt_videos').select('title').eq('video_id', video_id).single()
+      keywords = extractKeywords(data?.title)
+      if (!keyword) keyword = keywords[0] ?? ''
+    }
+    res.json({ keyword, keywords, results: await relatedFromDb(keyword, video_id) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 🔎 관련 주제 — 유튜브 전체 검색 (search.list = 100 유닛, 누를 때만)
+app.post('/api/related/search', requireAuth, async (req, res) => {
+  try {
+    const { q, video_id } = req.body ?? {}
+    const term = String(q ?? '').trim()
+    if (!term) return res.status(400).json({ error: '키워드가 필요해요' })
+
+    const found = await ytGet('search', {
+      part: 'snippet', type: 'video', maxResults: 25, q: term, order: 'viewCount'
+    })
+    const ids = (found.items ?? []).map((i) => i.id?.videoId).filter(Boolean)
+
+    let saved = 0
+    if (ids.length > 0) {
+      const watches = await supabase.from('yt_watches').select('*').eq('active', true)
+      const rows = watches.data ?? []
+      const cfg = {
+        includeKws: rows.filter((w) => w.type === 'include_kw').map((w) => w.value),
+        excludeKws: rows.filter((w) => w.type === 'exclude_kw').map((w) => w.value),
+        categoryIds: rows.filter((w) => w.type === 'category').map((w) => String(w.value))
+      }
+      const details = await fetchVideoDetails(ids)
+      saved = await saveVideos(details, `related:${term}`, cfg)
+    }
+
+    res.json({ keyword: term, saved, units: 100 + Math.ceil(ids.length / 50), results: await relatedFromDb(term, video_id) })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
