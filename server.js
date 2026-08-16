@@ -1,3 +1,4 @@
+const fs = require('fs')
 const path = require('path')
 const express = require('express')
 const cron = require('node-cron')
@@ -23,9 +24,67 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY, {
   auth: { persistSession: false }
 })
 
+// ---------------------------------------------------------------- 실패 로그
+//
+// 실패는 DB 가 아니라 로컬 파일에 남긴다. 수집 실패까지 DB 에 쓰면
+// DB 가 흔들릴 때 로그도 같이 사라진다. 하루 한 파일, 한 줄 JSON.
+const LOG_DIR = path.join(__dirname, 'logs')
+
+function logFailure(scope, err) {
+  const line = JSON.stringify({
+    at: new Date().toISOString(),
+    scope,
+    status: err?.status ?? null,
+    reason: err?.reason ?? null,
+    message: err?.message ?? String(err)
+  })
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    fs.appendFileSync(
+      path.join(LOG_DIR, `collect-${new Date().toISOString().slice(0, 10)}.log`),
+      `${line}\n`
+    )
+  } catch (e) {
+    // 로그를 못 남긴다고 수집을 멈추지는 않는다
+    console.warn(`[log] 실패 로그 기록 실패: ${e.message}`)
+  }
+}
+
 // ---------------------------------------------------------------- YouTube API
 
 const YT_BASE = 'https://www.googleapis.com/youtube/v3'
+
+class YtError extends Error {
+  constructor(message, status, reason) {
+    super(message)
+    this.name = 'YtError'
+    this.status = status
+    this.reason = reason
+  }
+}
+
+// 할당량이 바닥나면 이번 사이클은 무엇을 더 불러도 같은 답이 온다.
+// 재시도로 시간을 버리지 말고 사이클을 접은 뒤 다음 cron 에서 정상 복귀한다.
+const QUOTA_REASONS = new Set([
+  'quotaExceeded', 'dailyLimitExceeded', 'rateLimitExceeded', 'userRateLimitExceeded'
+])
+
+function isQuotaError(err) {
+  if (!err) return false
+  if (err.reason && QUOTA_REASONS.has(err.reason)) return true
+  if (err.status === 429) return true
+  return err.status === 403 && /quota/i.test(err.message ?? '')
+}
+
+// 5xx 와 네트워크 오류만 다시 걸어 본다. 4xx(키 오류·잘못된 요청)는 다시 걸어도 같다.
+function isTransient(err) {
+  if (isQuotaError(err)) return false
+  if (!(err instanceof YtError)) return true
+  return err.status >= 500
+}
+
+const RETRY = { tries: 3, baseMs: 800 }
+const sleep = (ms) => new Promise((r) => setTimeout(r, ms))
 
 async function ytGet(endpoint, params) {
   const url = new URL(`${YT_BASE}/${endpoint}`)
@@ -34,12 +93,33 @@ async function ytGet(endpoint, params) {
   }
   url.searchParams.set('key', YT_API_KEY)
 
-  const res = await fetch(url)
-  if (!res.ok) {
-    const body = await res.text()
-    throw new Error(`${endpoint} ${res.status}: ${body.slice(0, 300)}`)
+  let lastErr
+  for (let attempt = 1; attempt <= RETRY.tries; attempt++) {
+    try {
+      const res = await fetch(url)
+      if (res.ok) return await res.json()
+
+      const body = await res.text()
+      let reason = null
+      try {
+        reason = JSON.parse(body)?.error?.errors?.[0]?.reason ?? null
+      } catch { /* 본문이 JSON 이 아닐 수도 있다 */ }
+      lastErr = new YtError(
+        `${endpoint} ${res.status}${reason ? ` (${reason})` : ''}: ${body.slice(0, 300)}`,
+        res.status,
+        reason
+      )
+    } catch (err) {
+      lastErr = err // fetch 자체가 실패(네트워크·DNS·타임아웃)
+    }
+
+    if (!isTransient(lastErr)) throw lastErr
+    if (attempt < RETRY.tries) {
+      console.warn(`[yt] ${endpoint} ${attempt}차 실패, 재시도: ${lastErr.message}`)
+      await sleep(RETRY.baseMs * attempt)
+    }
   }
-  return res.json()
+  throw lastErr
 }
 
 // videos.list 는 한 번에 50개까지. id 를 나눠 던진다.
@@ -481,6 +561,23 @@ async function recomputeMultiples() {
 // ---------------------------------------------------------------- 수집
 
 let lastRun = null
+let collecting = false
+
+// 실패는 한 곳에서 기록한다 (콘솔 + 화면용 report + logs/ 파일).
+// 할당량 문제면 true 를 돌려주고, 부르는 쪽은 이번 사이클을 접는다.
+function noteError(report, scope, err) {
+  const msg = err?.message ?? String(err)
+  console.error(`[collect] ${scope} 실패:`, msg)
+  report.errors.push(`${scope}: ${msg}`)
+  logFailure(scope, err)
+
+  if (isQuotaError(err)) {
+    report.aborted = 'quota'
+    console.warn('[collect] 할당량 초과 — 이번 사이클은 접고 다음 주기에 다시 시도합니다')
+    return true
+  }
+  return false
+}
 
 async function readSettings() {
   const { data } = await supabase
@@ -489,11 +586,9 @@ async function readSettings() {
   return { trendingOn: flags.has('trending_on') } // 기본 off
 }
 
-async function collect() {
-  const started = Date.now()
-  const report = { trending: 0, watches: 0, videos: 0, byWatch: {}, units: 0, errors: [] }
-  console.log('[collect] 시작')
-
+// 한 단계가 실패해도 다음 단계는 계속한다.
+// 다만 할당량이 바닥나면 뒤 단계도 전부 같은 오류를 받을 뿐이라 그 자리에서 접는다.
+async function runCycle(report) {
   // 채점에 쓸 설정을 먼저 읽는다 (급상승 카테고리 필터가 여기 달려 있다)
   let watches = []
   try {
@@ -502,8 +597,7 @@ async function collect() {
     if (error) throw error
     watches = data ?? []
   } catch (err) {
-    console.error('[collect] 감시 목록 조회 실패:', err.message)
-    report.errors.push(`감시 목록: ${err.message}`)
+    noteError(report, '감시 목록', err)
   }
 
   const cfg = {
@@ -526,8 +620,7 @@ async function collect() {
       report.units += 1
       report.trending = await saveVideos(data.items ?? [], 'trending', cfg)
     } catch (err) {
-      console.error('[collect] 인기 급상승 실패:', err.message)
-      report.errors.push(`인기 급상승: ${err.message}`)
+      if (noteError(report, '인기 급상승', err)) return
     }
   }
 
@@ -573,8 +666,7 @@ async function collect() {
       report.byWatch[w.label || w.value] = saved
       report.watches++
     } catch (err) {
-      console.error(`[collect] 감시 "${w.label || w.value}" 실패:`, err.message)
-      report.errors.push(`${w.label || w.value}: ${err.message}`)
+      if (noteError(report, `감시 ${w.label || w.value}`, err)) return
     }
   }
 
@@ -593,12 +685,11 @@ async function collect() {
           report.units += r.used
           if (r.saved > 0) report.backfill[watch.label || watch.value] = r.saved
         } catch (err) {
-          console.error(`[collect] 백카탈로그 "${watch.label}" 실패:`, err.message)
-          report.errors.push(`백카탈로그 ${watch.label}: ${err.message}`)
+          if (noteError(report, `백카탈로그 ${watch.label || watch.value}`, err)) return
         }
       }
     } catch (err) {
-      report.errors.push(`백카탈로그: ${err.message}`)
+      if (noteError(report, '백카탈로그', err)) return
     }
   }
 
@@ -608,8 +699,7 @@ async function collect() {
     report.durations = r.filled
     report.units += r.used
   } catch (err) {
-    console.error('[collect] 재생시간 백필 실패:', err.message)
-    report.errors.push(`재생시간: ${err.message}`)
+    if (noteError(report, '재생시간 백필', err)) return
   }
 
   // d. 채널 정보(구독자·최근 중앙값) — 하루 1회
@@ -618,16 +708,36 @@ async function collect() {
     report.channels = r.updated
     report.units += r.units
   } catch (err) {
-    console.error('[collect] 채널 정보 갱신 실패:', err.message)
-    report.errors.push(`채널 정보: ${err.message}`)
+    if (noteError(report, '채널 정보', err)) return
   }
 
   // e. 채널별 중앙값 대비 배율 갱신
   try {
     report.multiples = await recomputeMultiples()
   } catch (err) {
-    console.error('[collect] 배율 계산 실패:', err.message)
-    report.errors.push(`배율: ${err.message}`)
+    noteError(report, '배율', err)
+  }
+}
+
+// 수동 수집과 cron 이 겹치면 같은 일을 두 번 하며 할당량만 태운다. 한 번에 하나만 돈다.
+async function collect() {
+  if (collecting) {
+    console.warn('[collect] 이미 실행 중입니다. 이번 호출은 건너뜁니다')
+    return lastRun
+  }
+  collecting = true
+
+  const started = Date.now()
+  const report = { trending: 0, watches: 0, videos: 0, byWatch: {}, units: 0, errors: [] }
+  console.log('[collect] 시작')
+
+  try {
+    await runCycle(report)
+  } catch (err) {
+    // 예상 못 한 오류까지 여기서 삼킨다. 사이클만 접히고 서버와 cron 은 그대로 산다.
+    noteError(report, '수집', err)
+  } finally {
+    collecting = false
   }
 
   lastRun = {
@@ -1413,6 +1523,9 @@ app.post('/api/channels/refresh', requireAuth, async (req, res) => {
 
 app.post('/api/collect', requireAuth, async (req, res) => {
   try {
+    if (collecting) {
+      return res.status(409).json({ error: '이미 수집이 돌고 있어요. 끝나면 화면이 갱신됩니다' })
+    }
     res.json(await collect())
   } catch (err) {
     res.status(500).json({ error: err.message })

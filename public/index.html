@@ -810,7 +810,7 @@ async function render() {
       <p class="muted">아무것도 선택하지 않으면 급상승 전체를 봅니다.</p>
 
       <p class="muted" style="margin-top:14px">
-        ${lastRun ? `최근 수집 ${new Date(lastRun.at).toLocaleString('ko-KR')} · 급상승 ${lastRun.trending}건 · 감시 ${lastRun.watches}건${lastRun.errors?.length ? ` · 오류 ${lastRun.errors.length}건` : ''}` : '아직 수집 기록이 없어요.'}
+        ${lastRun ? `최근 수집 ${new Date(lastRun.at).toLocaleString('ko-KR')} · 급상승 ${lastRun.trending}건 · 감시 ${lastRun.watches}건${lastRun.errors?.length ? ` · 오류 ${lastRun.errors.length}건` : ''}${lastRun.aborted === 'quota' ? ' · <b>할당량 초과로 중단 (다음 주기에 재시도)</b>' : ''}` : '아직 수집 기록이 없어요.'}
       </p>
     `
 
