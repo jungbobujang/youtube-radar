@@ -458,3 +458,14 @@ $$;
 발굴·신작 탭의 기본값은 **롱폼**입니다. 재생시간이 아직 없는(`null`) 영상은
 `형식 전체` 에서만 보입니다. 매 수집마다 예산(`DURATION_UNIT_BUDGET`) 안에서
 50개씩 채워 넣습니다.
+
+### 1-i. 채널 단위 형식 오버라이드 (v0.9)
+
+```sql
+alter table public.yt_watches add column if not exists format_override text
+  check (format_override in ('long','shorts'));
+```
+
+`null` 이면 재생시간으로 자동 판별하고, 값이 있으면 길이와 무관하게 그 형식으로 봅니다.
+1분짜리를 정규 콘텐츠로 올리는 채널처럼 길이로 갈리지 않는 경우를 위한 장치입니다.
+`recompute_multiples` 도 이 오버라이드를 반영해 형식별 중앙값을 나눕니다.

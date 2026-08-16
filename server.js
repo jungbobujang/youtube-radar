@@ -76,12 +76,21 @@ function videoFormat(sec) {
   return 'long'
 }
 
-// 형식 필터를 쿼리에 얹는다. 'all' 이면 그대로 둔다.
-function applyFormatFilter(q, format) {
-  if (format === 'shorts') return q.lte('duration_sec', FORMAT_BOUNDS.SHORTS)
-  if (format === 'mid') return q.gt('duration_sec', FORMAT_BOUNDS.SHORTS).lte('duration_sec', FORMAT_BOUNDS.MID)
-  if (format === 'long') return q.gt('duration_sec', FORMAT_BOUNDS.MID)
-  return q
+// 채널 단위 오버라이드가 있으면 재생시간을 무시하고 그 값을 쓴다.
+// 1분짜리를 정규 콘텐츠로 올리는 채널처럼, 길이로는 갈리지 않는 경우가 있다.
+function effectiveFormat(video, overrides) {
+  const ov = overrides?.get(video.channel_id)
+  return ov || videoFormat(video.duration_sec)
+}
+
+// 채널 id -> format_override
+async function formatOverrides() {
+  const { data, error } = await supabase
+    .from('yt_watches').select('value, format_override').eq('type', 'channel')
+  if (error) return new Map() // 컬럼이 아직 없으면 오버라이드 없이 동작
+  return new Map((data ?? [])
+    .filter((w) => w.format_override)
+    .map((w) => [w.value, w.format_override]))
 }
 
 // ---------------------------------------------------------------- 저장
@@ -817,7 +826,6 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       .gte('score', 0)
       .order('multiple', { ascending: false })
       .limit(600)
-    q = applyFormatFilter(q, format)
     if (channel !== 'all') q = q.eq('channel_id', channel)
     if (group !== 'all') {
       const ids = await groupChannelIds(group)
@@ -829,8 +837,11 @@ app.get('/api/dig', requireAuth, async (req, res) => {
     if (error) throw error
 
     const chans = await channelMap()
+    const overrides = await formatOverrides()
     const rows = (data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
+      .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
+      .filter((v) => format === 'all' || v.format === format)
       .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
 
     // 참여율 상위 25% 를 진한반응으로 표시
@@ -882,22 +893,22 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
     if (ids.length === 0) return res.json([])
 
     const since = new Date(Date.now() - 30 * 864e5).toISOString()
-    let fq = supabase
+    const { data, error } = await supabase
       .from('yt_videos')
       .select('*')
       .in('channel_id', ids)
       .gte('published_at', since)
       .gte('score', 0)
       .order('published_at', { ascending: false })
-      .limit(200)
-    fq = applyFormatFilter(fq, format)
-
-    const { data, error } = await fq
+      .limit(300)
     if (error) throw error
 
     const chans = await channelMap()
+    const overrides = await formatOverrides()
     res.json((data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
+      .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
+      .filter((v) => format === 'all' || v.format === format)
       .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
       .slice(0, 80))
   } catch (err) {
@@ -1173,6 +1184,25 @@ app.post('/api/watches', requireAuth, async (req, res) => {
       .insert({ type, value: stored, label: label?.trim() || value.trim(), active: true })
       .select()
       .single()
+    if (error) throw error
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.patch('/api/watches/:id', requireAuth, async (req, res) => {
+  try {
+    const { format_override } = req.body ?? {}
+    const allowed = [null, '', 'long', 'shorts']
+    if (!allowed.includes(format_override)) {
+      return res.status(400).json({ error: '형식 값을 확인해 주세요' })
+    }
+    const { data, error } = await supabase
+      .from('yt_watches')
+      .update({ format_override: format_override || null })
+      .eq('id', req.params.id)
+      .select().single()
     if (error) throw error
     res.json(data)
   } catch (err) {
