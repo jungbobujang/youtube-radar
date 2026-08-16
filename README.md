@@ -118,7 +118,9 @@ npm run dev             # node --env-file=.env server.js
 http://localhost:3000 → 접속 코드 입력
 
 `npm start` 는 `.env` 를 읽지 않습니다(배포용). 로컬에서는 `npm run dev` 를 쓰세요.
-Node 20.6 이상이 필요합니다 (`--env-file`, 전역 `fetch`).
+**Node 22 이상이 필요합니다.** `--env-file` 과 전역 `fetch` 는 20.6 부터 쓸 수 있지만,
+`@supabase/supabase-js` 가 전역 `WebSocket` 을 찾기 때문에 22 미만에서는
+`native WebSocket not found` 로 실행이 실패합니다. `package.json` 의 `engines` 로 못박아 뒀습니다.
 
 ### 환경변수
 

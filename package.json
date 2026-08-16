@@ -5,7 +5,7 @@
   "description": "유튜브 인기 급상승 · 키워드 · 채널 감시 레이더",
   "type": "commonjs",
   "engines": {
-    "node": ">=20.6"
+    "node": ">=22"
   },
   "scripts": {
     "start": "node server.js",
