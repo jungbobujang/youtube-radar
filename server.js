@@ -58,6 +58,24 @@ async function fetchVideoDetails(ids) {
 
 // ---------------------------------------------------------------- 저장
 
+// 채널의 "업로드" 재생목록 ID. 한 번 알아내면 yt_watches 에 캐시한다.
+// 캐시 컬럼이 아직 없어도 죽지 않고 매번 조회로 버틴다 (channels.list = 1 유닛).
+async function uploadsPlaylistId(watch) {
+  if (watch.uploads_playlist_id) return watch.uploads_playlist_id
+
+  const data = await ytGet('channels', { part: 'contentDetails', id: watch.value })
+  const id = data.items?.[0]?.contentDetails?.relatedPlaylists?.uploads
+  if (!id) throw new Error(`업로드 재생목록을 찾지 못했습니다 (${watch.value})`)
+
+  const { error } = await supabase
+    .from('yt_watches').update({ uploads_playlist_id: id }).eq('id', watch.id)
+  if (error) {
+    console.warn(`[collect] uploads_playlist_id 캐시 실패(컬럼 없음?): ${error.message}`)
+  }
+  watch.uploads_playlist_id = id
+  return id
+}
+
 // ---------------------------------------------------------------- 채점
 
 const EXCLUDED = -999
@@ -128,7 +146,7 @@ let lastRun = null
 
 async function collect() {
   const started = Date.now()
-  const report = { trending: 0, watches: 0, videos: 0, errors: [] }
+  const report = { trending: 0, watches: 0, videos: 0, byWatch: {}, units: 0, errors: [] }
   console.log('[collect] 시작')
 
   // 채점에 쓸 설정을 먼저 읽는다 (급상승 카테고리 필터가 여기 달려 있다)
@@ -157,6 +175,7 @@ async function collect() {
       regionCode: 'KR',
       maxResults: 50
     })
+    report.units += 1
     report.trending = await saveVideos(data.items ?? [], 'trending', cfg)
   } catch (err) {
     console.error('[collect] 인기 급상승 실패:', err.message)
@@ -169,28 +188,40 @@ async function collect() {
     if (w.type !== 'keyword' && w.type !== 'channel') continue // 나머지는 채점용 설정
     // 한 감시 대상이 실패해도 나머지는 계속한다
     try {
-      const params = {
-        part: 'snippet',
-        type: 'video',
-        maxResults: 25
-      }
-      if (w.type === 'keyword') {
-        params.q = w.value
-        params.order = 'viewCount'
-        params.publishedAfter = since
-      } else if (w.type === 'channel') {
-        params.channelId = w.value
-        params.order = 'date'
-      } else {
-        continue
-      }
+      let ids = []
 
-      const found = await ytGet('search', params) // search.list = 100 유닛
-      const ids = (found.items ?? []).map((i) => i.id?.videoId).filter(Boolean)
+      if (w.type === 'keyword') {
+        // 키워드는 검색 말고 방법이 없다 (search.list = 100 유닛)
+        const found = await ytGet('search', {
+          part: 'snippet',
+          type: 'video',
+          maxResults: 25,
+          q: w.value,
+          order: 'viewCount',
+          publishedAfter: since
+        })
+        ids = (found.items ?? []).map((i) => i.id?.videoId).filter(Boolean)
+        report.units += 100
+      } else {
+        // 채널은 업로드 재생목록을 읽으면 1 유닛으로 끝난다
+        const before = w.uploads_playlist_id
+        const playlistId = await uploadsPlaylistId(w)
+        if (!before) report.units += 1 // channels.list 는 최초 1회만
+        const list = await ytGet('playlistItems', {
+          part: 'contentDetails',
+          playlistId,
+          maxResults: 25
+        })
+        report.units += 1
+        ids = (list.items ?? []).map((i) => i.contentDetails?.videoId).filter(Boolean)
+      }
       if (ids.length === 0) continue
 
       const details = await fetchVideoDetails(ids)
-      report.videos += await saveVideos(details, `${w.type}:${w.value}`, cfg)
+      report.units += Math.ceil(ids.length / 50)
+      const saved = await saveVideos(details, `${w.type}:${w.value}`, cfg)
+      report.videos += saved
+      report.byWatch[w.label || w.value] = saved
       report.watches++
     } catch (err) {
       console.error(`[collect] 감시 "${w.label || w.value}" 실패:`, err.message)
