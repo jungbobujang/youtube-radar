@@ -143,6 +143,23 @@
   .rel-row a { font-size: 13px; color: var(--ink); text-decoration: none; font-weight: 600; }
   .rel-row a:hover { text-decoration: underline; }
   .rel-msg { margin: 8px 0 0; font-size: 12px; }
+
+  .gm { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .gm-icon { background: none; border: none; padding: 0; font-size: 14px; line-height: 1; }
+  .gm-name {
+    border: none; background: none; font: inherit; font-size: 13px;
+    width: 108px; padding: 2px 4px; border-radius: 6px; color: var(--ink);
+  }
+  .gm-name:hover { background: var(--bg); }
+  .gm-name:focus { outline: 1px solid var(--accent); background: #fff; }
+
+  .gchips { display: flex; gap: 3px; flex-wrap: wrap; margin-top: 3px; }
+  .chip-g {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 999px;
+    padding: 1px 7px; font-size: 12px; line-height: 1.5; opacity: 0.4;
+  }
+  .chip-g:hover { opacity: 0.75; }
+  .chip-g-on { opacity: 1; border-color: var(--ink); background: #fff; }
   .hits { font-size: 11px; color: var(--accent); flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .sec { font-size: 13px; font-weight: 700; margin: 22px 0 8px; }
@@ -195,10 +212,43 @@
 <script>
 const $ = (s) => document.querySelector(s)
 let tab = 'dig'
-let settings = { trendingOn: false, channels: [] }
+let settings = { trendingOn: false, channels: [], groups: [] }
 let digPeriod = 'all'
 let digChannel = 'all'
 let digSort = 'dig'
+let digGroup = 'all'
+let digSubs = 'all'
+
+const SUB_OPTS = [['all', '구독자 전체'], ['small', '~5만'], ['mid', '5~30만'], ['large', '30만+']]
+
+function filterBar(extra = '') {
+  return `
+    ${extra}
+    <select id="f-group">
+      <option value="all">모든 그룹</option>
+      ${settings.groups.map((g) => `<option value="${esc(g.id)}" ${digGroup === g.id ? 'selected' : ''}>${esc(g.icon)} ${esc(g.name)}</option>`).join('')}
+    </select>
+    <select id="f-channel">
+      <option value="all">모든 채널</option>
+      ${settings.channels.map((c) => `<option value="${esc(c.value)}" ${digChannel === c.value ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+    </select>
+    <select id="f-subs">
+      ${SUB_OPTS.map(([v, t]) => `<option value="${v}" ${digSubs === v ? 'selected' : ''}>${t}</option>`).join('')}
+    </select>`
+}
+
+function wireFilters() {
+  const bind = (id, fn) => { const el = $(id); if (el) el.onchange = (e) => { fn(e.target.value); render() } }
+  bind('#f-sort', (v) => { digSort = v })
+  bind('#f-period', (v) => { digPeriod = v })
+  bind('#f-group', (v) => { digGroup = v })
+  bind('#f-channel', (v) => { digChannel = v })
+  bind('#f-subs', (v) => { digSubs = v })
+}
+
+function filterQuery() {
+  return `group=${encodeURIComponent(digGroup)}&channel=${encodeURIComponent(digChannel)}&subs=${digSubs}`
+}
 
 // 유튜브 영상 카테고리 (KR 주요 항목)
 const YT_CATEGORIES = [
@@ -371,30 +421,25 @@ async function render() {
   panel.innerHTML = '<p class="muted">불러오는 중...</p>'
   try {
     if (tab === 'dig') {
-      const rows = await api(`/api/dig?period=${digPeriod}&channel=${encodeURIComponent(digChannel)}&sort=${digSort}`)
+      const rows = await api(`/api/dig?period=${digPeriod}&sort=${digSort}&${filterQuery()}`)
       panel.innerHTML = `
         <div class="filters">
-          <select id="f-sort">
-            ${[['dig', '발굴점수순'], ['reach', '침투력순'], ['engage', '참여율순'], ['multiple', '배율순']]
-              .map(([v, t]) => `<option value="${v}" ${digSort === v ? 'selected' : ''}>${t}</option>`).join('')}
-          </select>
-          <select id="f-period">
-            ${[['all', '전체 (6개월~3년)'], ['6m-1y', '6개월~1년'], ['1y-2y', '1~2년'], ['2y+', '2년 이상']]
-              .map(([v, t]) => `<option value="${v}" ${digPeriod === v ? 'selected' : ''}>${t}</option>`).join('')}
-          </select>
-          <select id="f-channel">
-            <option value="all">모든 채널</option>
-            ${settings.channels.map((c) => `<option value="${esc(c.value)}" ${digChannel === c.value ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
-          </select>
+          ${filterBar(`
+            <select id="f-sort">
+              ${[['dig', '발굴점수순'], ['reach', '침투력순'], ['engage', '참여율순'], ['multiple', '배율순']]
+                .map(([v, t]) => `<option value="${v}" ${digSort === v ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>
+            <select id="f-period">
+              ${[['all', '전체 (6개월~3년)'], ['6m-1y', '6개월~1년'], ['1y-2y', '1~2년'], ['2y+', '2년 이상']]
+                .map(([v, t]) => `<option value="${v}" ${digPeriod === v ? 'selected' : ''}>${t}</option>`).join('')}
+            </select>`)}
           <span class="muted">${rows.length}건</span>
         </div>
         ${rows.length ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
           : `<p class="empty">조건에 맞는 영상이 없어요. 백카탈로그가 더 쌓이면 나타납니다.
                (배율은 채널당 영상 5개 이상 모여야 계산됩니다)</p>`}
       `
-      $('#f-sort').onchange = (e) => { digSort = e.target.value; render() }
-      $('#f-period').onchange = (e) => { digPeriod = e.target.value; render() }
-      $('#f-channel').onchange = (e) => { digChannel = e.target.value; render() }
+      wireFilters()
       wireRows(panel)
       return
     }
@@ -412,10 +457,14 @@ async function render() {
     }
 
     if (tab === 'fresh') {
-      const rows = await api('/api/fresh')
-      panel.innerHTML = rows.length
-        ? rows.map((v) => videoRow(v, v.multiple ? `<span class="m">x${v.multiple.toFixed(1)}</span>` : '')).join('')
-        : '<p class="empty">최근 30일 영상이 없어요.</p>'
+      const rows = await api(`/api/fresh?${filterQuery()}`)
+      panel.innerHTML = `
+        <div class="filters">${filterBar()}<span class="muted">${rows.length}건</span></div>
+        ${rows.length
+          ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
+          : '<p class="empty">최근 30일 영상이 없어요.</p>'}
+      `
+      wireFilters()
       wireRows(panel)
       return
     }
@@ -453,10 +502,24 @@ async function render() {
     }
 
     const { watches, lastRun } = await api('/api/watches')
+    const { groups, links } = await api('/api/groups')
+    settings.groups = groups
+
     const of = (t) => watches.filter((w) => w.type === t)
-    // 할당량을 쓰는 건 search.list 를 부르는 keyword/channel 뿐이다
-    const costing = watches.filter((w) => w.active && ['keyword', 'channel'].includes(w.type)).length
+    const chCount = of('channel').length
+    const kwCount = of('keyword').filter((w) => w.active).length
     const pickedCats = of('category').map((w) => String(w.value))
+
+    const memberOf = (watchId) => new Set(links.filter((l) => l.watch_id === watchId).map((l) => l.group_id))
+
+    // 채널을 그룹별로 묶는다. 여러 그룹에 속하면 각 섹션에 모두 나온다.
+    const grouped = new Set()
+    const sections = groups.map((g) => {
+      const items = of('channel').filter((w) => memberOf(w.id).has(g.id))
+      items.forEach((w) => grouped.add(w.id))
+      return { group: g, items }
+    })
+    sections.push({ group: null, items: of('channel').filter((w) => !grouped.has(w.id)) })
 
     const chipList = (type, icon) => of(type).length
       ? of(type).map((w) => `
@@ -468,12 +531,29 @@ async function render() {
 
     panel.innerHTML = `
       <div class="notice">
-        <b>API 할당량 주의</b> — YouTube Data API는 하루 10,000 유닛입니다.
-        <b>키워드·채널 감시</b>는 1건당 <b>search.list 100유닛</b>을 쓰고 3시간마다(하루 8회)
-        돌기 때문에 <b>10개 이하</b>를 권장합니다.
-        현재 <b>${costing}개</b> → 하루 약 ${fmt(costing * 100 * 8)} 유닛.
-        <br>관심/제외 키워드와 카테고리 필터는 <b>추가 호출 없이</b> 채점에만 쓰이므로 할당량과 무관합니다.
+        <b>API 할당량</b> — YouTube Data API는 하루 10,000 유닛입니다.
+        채널 수집은 <b>업로드 재생목록 방식</b>이라 채널당 회당 <b>2~3유닛</b>만 씁니다
+        (재생목록 1 + 상세 1, 최초 1회만 채널조회 1).
+        <b>실측: 채널 ${chCount}개 + 백카탈로그 포함 1회 302유닛, 하루 8회 약 ${fmt(302 * 8)}유닛.</b>
+        백카탈로그가 다 차면 회당 40유닛대로 떨어집니다.
+        <br>키워드 감시만 <b>search.list 100유닛</b>을 쓰므로 개수를 조심하세요 (현재 ${kwCount}개).
+        관심/제외 키워드·카테고리·그룹은 추가 호출 없이 분류에만 쓰여 할당량과 무관합니다.
       </div>
+
+      <h3 class="sec">📁 채널 그룹</h3>
+      <div class="gm">
+        ${(settings.groups ?? []).map((g) => `
+          <span class="kw">
+            <button class="gm-icon" data-gicon="${esc(g.id)}" title="아이콘 변경">${esc(g.icon)}</button>
+            <input class="gm-name" data-gname="${esc(g.id)}" value="${esc(g.name)}">
+            <button data-gdel="${esc(g.id)}" aria-label="그룹 삭제">✕</button>
+          </span>`).join('') || '<span class="empty">그룹이 없어요</span>'}
+      </div>
+      <div class="form">
+        <input id="g-name" placeholder="새 그룹 이름">
+        <button class="btn btn-sm" id="g-add">그룹 추가</button>
+      </div>
+      <p class="muted">그룹을 지워도 채널은 남고 연결만 끊깁니다.</p>
 
       <h3 class="sec">🔥 급상승 수집</h3>
       <label class="cat">
@@ -492,16 +572,34 @@ async function render() {
         <button class="btn btn-sm" id="w-add">추가</button>
       </div>
       <p class="err" id="w-err"></p>
-      ${[...of('keyword'), ...of('channel')].map((w) => `
+      ${of('keyword').map((w) => `
         <div class="row ${w.active ? '' : 'off'}">
           <div class="meta">
-            <span class="title">${w.type === 'keyword' ? '🔍' : '📺'} ${esc(w.label || w.value)}</span>
+            <span class="title">🔍 ${esc(w.label || w.value)}</span>
             <div class="sub"><span>${esc(w.value)}</span></div>
           </div>
           <button class="btn-ghost btn-sm" data-toggle="${w.id}">${w.active ? '끄기' : '켜기'}</button>
           <button class="btn-ghost btn-sm" data-del="${w.id}">삭제</button>
         </div>
-      `).join('') || '<p class="empty">없음</p>'}
+      `).join('')}
+
+      ${sections.map(({ group, items }) => `
+        <h3 class="sec">${group ? `${esc(group.icon)} ${esc(group.name)}` : '📂 미분류'}
+          <span class="muted">${items.length}개</span></h3>
+        ${items.length ? items.map((w) => `
+          <div class="row ${w.active ? '' : 'off'}">
+            <div class="meta">
+              <span class="title">📺 ${esc(w.label || w.value)}</span>
+              <div class="gchips">
+                ${(settings.groups ?? []).map((g) => `
+                  <button class="chip-g ${memberOf(w.id).has(g.id) ? 'chip-g-on' : ''}"
+                          data-wg="${esc(w.id)}|${esc(g.id)}">${esc(g.icon)}</button>`).join('')}
+              </div>
+            </div>
+            <button class="btn-ghost btn-sm" data-toggle="${w.id}">${w.active ? '끄기' : '켜기'}</button>
+            <button class="btn-ghost btn-sm" data-del="${w.id}">삭제</button>
+          </div>`).join('') : '<p class="empty">없음</p>'}
+      `).join('')}
 
       <h3 class="sec">🎯 관심 키워드 <span class="muted">(제목에 걸리면 +30점)</span></h3>
       <div class="form">
@@ -539,6 +637,50 @@ async function render() {
         render()
       } catch (e) { $('#w-err').textContent = e.message }
     }
+
+    // 그룹 관리
+    $('#g-add').onclick = async () => {
+      const name = $('#g-name').value.trim()
+      if (!name) return
+      await api('/api/groups', { method: 'POST', body: JSON.stringify({ name }) })
+      render()
+    }
+    panel.querySelectorAll('[data-gname]').forEach((inp) => {
+      inp.onblur = async () => {
+        await api(`/api/groups/${inp.dataset.gname}`, {
+          method: 'PATCH', body: JSON.stringify({ name: inp.value })
+        })
+      }
+      inp.onkeydown = (e) => { if (e.key === 'Enter') inp.blur() }
+    })
+    panel.querySelectorAll('[data-gicon]').forEach((b) => {
+      b.onclick = async () => {
+        const icon = prompt('그룹 아이콘 (이모지 1자)', b.textContent.trim())
+        if (!icon) return
+        await api(`/api/groups/${b.dataset.gicon}`, {
+          method: 'PATCH', body: JSON.stringify({ icon })
+        })
+        render()
+      }
+    })
+    panel.querySelectorAll('[data-gdel]').forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm('이 그룹을 삭제할까요? 채널은 남고 연결만 끊깁니다.')) return
+        await api(`/api/groups/${b.dataset.gdel}`, { method: 'DELETE' })
+        render()
+      }
+    })
+    panel.querySelectorAll('[data-wg]').forEach((b) => {
+      b.onclick = async () => {
+        const [watchId, groupId] = b.dataset.wg.split('|')
+        const on = !b.classList.contains('chip-g-on')
+        b.classList.toggle('chip-g-on', on)
+        await api('/api/watch-groups', {
+          method: 'POST', body: JSON.stringify({ watch_id: watchId, group_id: groupId, on })
+        })
+        render()
+      }
+    })
 
     $('#s-trending').onchange = async (e) => {
       settings = { ...settings, ...await api('/api/settings/trending', {

@@ -301,3 +301,25 @@ create index if not exists yt_videos_starred_idx on public.yt_videos (starred, s
 
 관련 주제 탐색은 기본적으로 **DB 안에서만** 찾습니다(할당량 0).
 `유튜브 전체에서 찾기` 를 누를 때만 `search.list` 1회(100유닛)를 씁니다.
+
+### 1-f. 채널 그룹 (v0.6 추가분)
+
+```sql
+create table if not exists public.yt_groups (
+  id uuid primary key default gen_random_uuid(),
+  name text not null,
+  icon text default '📁',
+  position int default 0
+);
+
+create table if not exists public.yt_watch_groups (
+  watch_id uuid not null references public.yt_watches(id) on delete cascade,
+  group_id uuid not null references public.yt_groups(id) on delete cascade,
+  primary key (watch_id, group_id)
+);
+
+alter table public.yt_groups enable row level security;
+alter table public.yt_watch_groups enable row level security;
+```
+
+채널은 여러 그룹에 동시에 속할 수 있습니다. 그룹을 지워도 채널은 남고 연결만 끊깁니다.

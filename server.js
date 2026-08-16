@@ -620,6 +620,33 @@ async function relatedFromDb(keyword, excludeId) {
     .slice(0, 10)
 }
 
+// ---------------------------------------------------------------- 그룹
+
+// 그룹 id -> 그 그룹에 속한 채널 id 목록
+async function groupChannelIds(groupId) {
+  const { data: links } = await supabase
+    .from('yt_watch_groups').select('watch_id').eq('group_id', groupId)
+  const watchIds = (links ?? []).map((r) => r.watch_id)
+  if (watchIds.length === 0) return []
+
+  const { data: watches } = await supabase
+    .from('yt_watches').select('value').in('id', watchIds).eq('type', 'channel')
+  return (watches ?? []).map((w) => w.value)
+}
+
+const SUB_RANGES = {
+  small: [0, 50000],
+  mid: [50000, 300000],
+  large: [300000, Number.MAX_SAFE_INTEGER]
+}
+
+function passesSubFilter(v, chans, key) {
+  const range = SUB_RANGES[key]
+  if (!range) return true
+  const subs = Number(chans.get(v.channel_id)?.subscriber_count ?? 0)
+  return subs >= range[0] && subs < range[1]
+}
+
 // ---------------------------------------------------------------- 서버
 
 const app = express()
@@ -710,6 +737,8 @@ app.get('/api/dig', requireAuth, async (req, res) => {
     const oldest = new Date(now - maxDays * 864e5).toISOString()
 
     // 정렬 기준이 계산값이라 후보를 넉넉히 받아 서버에서 줄 세운다
+    const { group = 'all', subs = 'all' } = req.query
+
     let q = supabase
       .from('yt_videos')
       .select('*')
@@ -720,12 +749,19 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       .order('multiple', { ascending: false })
       .limit(600)
     if (channel !== 'all') q = q.eq('channel_id', channel)
+    if (group !== 'all') {
+      const ids = await groupChannelIds(group)
+      if (ids.length === 0) return res.json([])
+      q = q.in('channel_id', ids)
+    }
 
     const { data, error } = await q
     if (error) throw error
 
     const chans = await channelMap()
-    const rows = (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+    const rows = (data ?? [])
+      .filter((v) => passesSubFilter(v, chans, subs))
+      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
 
     // 참여율 상위 25% 를 진한반응으로 표시
     const engages = rows.map((r) => r.engage).sort((a, b) => a - b)
@@ -762,9 +798,17 @@ app.get('/api/dig', requireAuth, async (req, res) => {
 // 📡 신작 — 감시 채널의 최근 30일 영상
 app.get('/api/fresh', requireAuth, async (req, res) => {
   try {
-    const { data: chans } = await supabase
-      .from('yt_watches').select('value').eq('type', 'channel')
-    const ids = (chans ?? []).map((c) => c.value)
+    const { group = 'all', channel = 'all', subs = 'all' } = req.query
+
+    let ids
+    if (group !== 'all') {
+      ids = await groupChannelIds(group)
+    } else {
+      const { data: chans } = await supabase
+        .from('yt_watches').select('value').eq('type', 'channel')
+      ids = (chans ?? []).map((c) => c.value)
+    }
+    if (channel !== 'all') ids = ids.filter((id) => id === channel)
     if (ids.length === 0) return res.json([])
 
     const since = new Date(Date.now() - 30 * 864e5).toISOString()
@@ -775,9 +819,14 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
       .gte('published_at', since)
       .gte('score', 0)
       .order('published_at', { ascending: false })
-      .limit(80)
+      .limit(200)
     if (error) throw error
-    res.json(data ?? [])
+
+    const chans = await channelMap()
+    res.json((data ?? [])
+      .filter((v) => passesSubFilter(v, chans, subs))
+      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+      .slice(0, 80))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -788,7 +837,84 @@ app.get('/api/settings', requireAuth, async (req, res) => {
     const s = await readSettings()
     const { data: chans } = await supabase
       .from('yt_watches').select('value, label').eq('type', 'channel').order('label')
-    res.json({ ...s, channels: chans ?? [] })
+    const { data: groups } = await supabase
+      .from('yt_groups').select('*').order('position', { ascending: true })
+    res.json({ ...s, channels: chans ?? [], groups: groups ?? [] })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ---- 그룹 CRUD
+
+app.get('/api/groups', requireAuth, async (req, res) => {
+  try {
+    const { data: groups, error } = await supabase
+      .from('yt_groups').select('*').order('position', { ascending: true })
+    if (error) throw error
+    const { data: links } = await supabase.from('yt_watch_groups').select('*')
+    res.json({ groups: groups ?? [], links: links ?? [] })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/groups', requireAuth, async (req, res) => {
+  try {
+    const { name, icon } = req.body ?? {}
+    if (!name?.trim()) return res.status(400).json({ error: '이름이 필요해요' })
+    const { data: cur } = await supabase.from('yt_groups').select('position')
+    const position = (cur ?? []).reduce((m, g) => Math.max(m, g.position ?? 0), 0) + 1
+    const { data, error } = await supabase
+      .from('yt_groups')
+      .insert({ name: name.trim(), icon: icon || '📁', position })
+      .select().single()
+    if (error) throw error
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.patch('/api/groups/:id', requireAuth, async (req, res) => {
+  try {
+    const patch = {}
+    if (req.body?.name !== undefined) patch.name = String(req.body.name).trim()
+    if (req.body?.icon !== undefined) patch.icon = req.body.icon
+    const { data, error } = await supabase
+      .from('yt_groups').update(patch).eq('id', req.params.id).select().single()
+    if (error) throw error
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 그룹을 지워도 채널은 남는다. 연결만 끊긴다 (on delete cascade).
+app.delete('/api/groups/:id', requireAuth, async (req, res) => {
+  try {
+    const { error } = await supabase.from('yt_groups').delete().eq('id', req.params.id)
+    if (error) throw error
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/watch-groups', requireAuth, async (req, res) => {
+  try {
+    const { watch_id, group_id, on } = req.body ?? {}
+    if (!watch_id || !group_id) return res.status(400).json({ error: '입력을 확인해 주세요' })
+    if (on) {
+      const { error } = await supabase
+        .from('yt_watch_groups').upsert({ watch_id, group_id }, { onConflict: 'watch_id,group_id' })
+      if (error) throw error
+    } else {
+      const { error } = await supabase
+        .from('yt_watch_groups').delete().eq('watch_id', watch_id).eq('group_id', group_id)
+      if (error) throw error
+    }
+    res.json({ ok: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
