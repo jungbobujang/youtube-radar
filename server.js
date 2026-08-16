@@ -531,7 +531,75 @@ async function refreshChannels(force = false) {
     const { error } = await supabase.from('yt_channels').upsert(rows, { onConflict: 'channel_id' })
     if (error) throw error
   }
-  return { updated: rows.length, units }
+  return { updated: rows.length, units, snapshots: await snapshotChannels(rows) }
+}
+
+// ---------------------------------------------------------------- 구독자 이력
+
+// 구독자 수는 yt_channels 에 최신값만 남아 덮어써진다. 추이를 보려면 따로 쌓아야 한다.
+// 테이블이 아직 없으면 조용히 건너뛴다 (TODO-SQL.md 참고).
+async function snapshotChannels(rows) {
+  if (rows.length === 0) return 0
+
+  const dayStart = new Date()
+  dayStart.setUTCHours(0, 0, 0, 0)
+
+  const { data: today, error } = await supabase
+    .from('yt_channel_snapshots')
+    .select('channel_id')
+    .gte('captured_at', dayStart.toISOString())
+  if (error) {
+    console.warn(`[channel] 구독자 이력 생략(테이블 없음?): ${error.message}`)
+    return 0
+  }
+
+  // 하루 한 건만 남긴다. 강제 갱신을 여러 번 눌러도 그날 기록은 늘지 않는다.
+  const have = new Set((today ?? []).map((r) => r.channel_id))
+  const fresh = rows
+    .filter((r) => !have.has(r.channel_id))
+    .map((r) => ({ channel_id: r.channel_id, subscriber_count: r.subscriber_count }))
+  if (fresh.length === 0) return 0
+
+  const { error: iErr } = await supabase.from('yt_channel_snapshots').insert(fresh)
+  if (iErr) {
+    console.warn(`[channel] 구독자 이력 기록 실패: ${iErr.message}`)
+    return 0
+  }
+  return fresh.length
+}
+
+const GROWTH_WINDOW_D = 7
+const GROWTH_MIN_SPAN_D = 6 // 7일치가 차기 전에는 '측정 중' 으로 둔다
+
+// 채널 id -> 최근 7일 구독자 증가. 하루 1건씩이라 채널당 8행이면 충분하다.
+async function channelGrowth() {
+  const since = new Date(Date.now() - (GROWTH_WINDOW_D + 1) * DAY).toISOString()
+  const { data, error } = await supabase
+    .from('yt_channel_snapshots')
+    .select('channel_id, subscriber_count, captured_at')
+    .gte('captured_at', since)
+    .order('captured_at', { ascending: true })
+    .limit(2000)
+  if (error) return {} // 테이블이 없으면 화면에서 이 항목만 빠진다
+
+  const by = {}
+  for (const s of data ?? []) (by[s.channel_id] ??= []).push(s)
+
+  const out = {}
+  for (const [id, arr] of Object.entries(by)) {
+    const first = arr[0]
+    const last = arr[arr.length - 1]
+    const days = (new Date(last.captured_at) - new Date(first.captured_at)) / DAY
+    out[id] = days >= GROWTH_MIN_SPAN_D
+      ? {
+          pending: false,
+          days: Math.round(days),
+          subs: Number(last.subscriber_count),
+          delta: Number(last.subscriber_count) - Number(first.subscriber_count)
+        }
+      : { pending: true, days: Math.round(days) }
+  }
+  return out
 }
 
 async function channelMap() {
@@ -1536,7 +1604,7 @@ app.get('/api/watches', requireAuth, async (req, res) => {
   const { data, error } = await supabase
     .from('yt_watches').select('*').order('created_at', { ascending: true })
   if (error) return res.status(500).json({ error: error.message })
-  res.json({ watches: data ?? [], lastRun })
+  res.json({ watches: data ?? [], lastRun, growth: await channelGrowth() })
 })
 
 app.post('/api/watches', requireAuth, async (req, res) => {

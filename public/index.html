@@ -580,6 +580,19 @@ function todayStamp() {
   return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
 }
 
+// 최근 7일 구독자 증가. 이력이 7일치 쌓이기 전에는 '측정 중' 으로 둔다.
+// 이력 테이블이 아직 없으면 서버가 아무것도 안 보내고, 그때는 칩 자체가 사라진다.
+function growthChip(g) {
+  if (!g) return ''
+  if (g.pending) {
+    return `<span class="m" title="하루 1회 기록 · 7일치가 쌓이면 표시됩니다">주간 구독 측정 중</span>`
+  }
+  const sign = g.delta > 0 ? '+' : g.delta < 0 ? '−' : ''
+  const cls = g.delta > 0 ? 'm-good' : g.delta < 0 ? 'm-warn' : ''
+  return `<span class="m ${cls}" title="최근 ${g.days}일 · 현재 ${fmt(g.subs)}명">
+    주간 구독 ${sign}${shortNum(Math.abs(g.delta))}</span>`
+}
+
 function ideaButton(v) {
   return `<button class="btn-ghost btn-sm idea" data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}">아이디어로</button>`
 }
@@ -793,7 +806,7 @@ async function render() {
       return
     }
 
-    const { watches, lastRun } = await api('/api/watches')
+    const { watches, lastRun, growth } = await api('/api/watches')
     const { groups, links } = await api('/api/groups')
     settings.groups = groups
 
@@ -883,6 +896,7 @@ async function render() {
             <div class="meta">
               <span class="title">📺 ${esc(w.label || w.value)}</span>
               <div class="gchips">
+                ${growthChip(growth?.[w.value])}
                 ${(settings.groups ?? []).map((g) => `
                   <button class="chip-g ${memberOf(w.id).has(g.id) ? 'chip-g-on' : ''}"
                           data-wg="${esc(w.id)}|${esc(g.id)}">${esc(g.icon)}</button>`).join('')}
