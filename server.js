@@ -144,6 +144,107 @@ async function saveVideos(items, source, cfg) {
   return items.length
 }
 
+// ---------------------------------------------------------------- 발굴 지표
+//
+// 발굴점수 = 배율 × 침투력 × (1 + 참여율/ENGAGE_DIVISOR)
+// 상수는 여기서 조정한다.
+const METRIC = {
+  ENGAGE_DIVISOR: 5,      // 참여율이 점수에 기여하는 정도 (클수록 영향 작아짐)
+  COMMENT_WEIGHT: 3,      // 댓글 1개를 좋아요 몇 개로 볼지
+  DEAD_CHANNEL: 0.05,     // 채널활력이 이 아래면 ⚠️ (죽은 채널의 과거 영광)
+  HOT_ENGAGE_PCTL: 0.75,  // 참여율 상위 25% 에 💬 진한반응
+  CHANNEL_TTL_H: 24,      // 구독자 수 갱신 주기(시간)
+  MEDIAN_WINDOW_D: 90     // 채널활력용 최근 N일
+}
+
+function deriveMetrics(v, channel) {
+  const views = Number(v.views ?? 0)
+  const subs = Number(channel?.subscriber_count ?? 0)
+  const recentMedian = Number(channel?.recent_median_views ?? 0)
+
+  const reach = subs > 0 ? views / subs : null                 // 침투력
+  const engage = views > 0
+    ? ((Number(v.like_count ?? 0) + Number(v.comment_count ?? 0) * METRIC.COMMENT_WEIGHT) / views) * 100
+    : 0                                                        // 참여율 %
+  const vitality = subs > 0 ? recentMedian / subs : null       // 채널활력
+  const multiple = Number(v.multiple ?? 0)
+
+  // 구독자 수를 아직 모르면 침투력을 1로 두어 배율·참여율만으로 점수를 낸다
+  const digScore = multiple * (reach ?? 1) * (1 + engage / METRIC.ENGAGE_DIVISOR)
+
+  return {
+    reach: reach == null ? null : Number(reach.toFixed(2)),
+    engage: Number(engage.toFixed(2)),
+    vitality: vitality == null ? null : Number(vitality.toFixed(4)),
+    dig_score: Number(digScore.toFixed(2)),
+    dead_channel: vitality != null && vitality < METRIC.DEAD_CHANNEL
+  }
+}
+
+// 구독자 수와 최근 90일 조회수 중앙값. 하루 1회만 갱신한다 (channels.list = 1유닛/50개)
+async function refreshChannels(force = false) {
+  const { data: watches } = await supabase
+    .from('yt_watches').select('value, label').eq('type', 'channel')
+  const ids = (watches ?? []).map((w) => w.value)
+  if (ids.length === 0) return { updated: 0, units: 0 }
+
+  const { data: existing } = await supabase.from('yt_channels').select('*')
+  const known = new Map((existing ?? []).map((c) => [c.channel_id, c]))
+
+  const cutoff = Date.now() - METRIC.CHANNEL_TTL_H * 3600e3
+  const stale = ids.filter((id) => {
+    const c = known.get(id)
+    return force || !c || !c.updated_at || new Date(c.updated_at).getTime() < cutoff
+  })
+  if (stale.length === 0) return { updated: 0, units: 0 }
+
+  let units = 0
+  const rows = []
+
+  for (let i = 0; i < stale.length; i += 50) {
+    const chunk = stale.slice(i, i + 50)
+    const data = await ytGet('channels', { part: 'snippet,statistics', id: chunk.join(',') })
+    units += 1
+    for (const c of data.items ?? []) {
+      rows.push({
+        channel_id: c.id,
+        title: c.snippet?.title ?? null,
+        subscriber_count: Number(c.statistics?.subscriberCount ?? 0),
+        recent_median_views: 0,
+        updated_at: new Date().toISOString()
+      })
+    }
+  }
+
+  // 최근 N일 영상 조회수의 중앙값
+  const since = new Date(Date.now() - METRIC.MEDIAN_WINDOW_D * 864e5).toISOString()
+  for (const row of rows) {
+    const { data: vids } = await supabase
+      .from('yt_videos').select('views')
+      .eq('channel_id', row.channel_id)
+      .gte('published_at', since)
+      .limit(1000)
+    const arr = (vids ?? []).map((r) => Number(r.views ?? 0)).sort((a, b) => a - b)
+    if (arr.length > 0) {
+      const mid = Math.floor(arr.length / 2)
+      row.recent_median_views = Math.round(
+        arr.length % 2 ? arr[mid] : (arr[mid - 1] + arr[mid]) / 2
+      )
+    }
+  }
+
+  if (rows.length > 0) {
+    const { error } = await supabase.from('yt_channels').upsert(rows, { onConflict: 'channel_id' })
+    if (error) throw error
+  }
+  return { updated: rows.length, units }
+}
+
+async function channelMap() {
+  const { data } = await supabase.from('yt_channels').select('*')
+  return new Map((data ?? []).map((c) => [c.channel_id, c]))
+}
+
 // ---------------------------------------------------------------- 백카탈로그
 
 const BACKFILL_MAX_PER_CHANNEL = 500 // 채널당 최대 보관 영상 수
@@ -342,7 +443,17 @@ async function collect() {
     }
   }
 
-  // d. 채널별 중앙값 대비 배율 갱신
+  // d. 채널 정보(구독자·최근 중앙값) — 하루 1회
+  try {
+    const r = await refreshChannels()
+    report.channels = r.updated
+    report.units += r.units
+  } catch (err) {
+    console.error('[collect] 채널 정보 갱신 실패:', err.message)
+    report.errors.push(`채널 정보: ${err.message}`)
+  }
+
+  // e. 채널별 중앙값 대비 배율 갱신
   try {
     report.multiples = await recomputeMultiples()
   } catch (err) {
@@ -541,6 +652,7 @@ app.get('/api/dig', requireAuth, async (req, res) => {
     const newest = new Date(now - minDays * 864e5).toISOString()
     const oldest = new Date(now - maxDays * 864e5).toISOString()
 
+    // 정렬 기준이 계산값이라 후보를 넉넉히 받아 서버에서 줄 세운다
     let q = supabase
       .from('yt_videos')
       .select('*')
@@ -549,12 +661,31 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       .lte('published_at', newest)
       .gte('score', 0)
       .order('multiple', { ascending: false })
-      .limit(80)
+      .limit(600)
     if (channel !== 'all') q = q.eq('channel_id', channel)
 
     const { data, error } = await q
     if (error) throw error
-    res.json(data ?? [])
+
+    const chans = await channelMap()
+    const rows = (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+
+    // 참여율 상위 25% 를 진한반응으로 표시
+    const engages = rows.map((r) => r.engage).sort((a, b) => a - b)
+    const cut = engages.length
+      ? engages[Math.floor((engages.length - 1) * METRIC.HOT_ENGAGE_PCTL)]
+      : Infinity
+    for (const r of rows) r.hot_engage = r.engage >= cut && r.engage > 0
+
+    const SORTS = {
+      dig: (a, b) => b.dig_score - a.dig_score,
+      reach: (a, b) => (b.reach ?? -1) - (a.reach ?? -1),
+      engage: (a, b) => b.engage - a.engage,
+      multiple: (a, b) => (b.multiple ?? 0) - (a.multiple ?? 0)
+    }
+    rows.sort(SORTS[req.query.sort] ?? SORTS.dig)
+
+    res.json(rows.slice(0, 80))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -709,6 +840,14 @@ app.delete('/api/watches/:id', requireAuth, async (req, res) => {
   const { error } = await supabase.from('yt_watches').delete().eq('id', req.params.id)
   if (error) return res.status(500).json({ error: error.message })
   res.json({ ok: true })
+})
+
+app.post('/api/channels/refresh', requireAuth, async (req, res) => {
+  try {
+    res.json(await refreshChannels(true))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
 })
 
 app.post('/api/collect', requireAuth, async (req, res) => {

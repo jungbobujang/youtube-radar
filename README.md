@@ -268,3 +268,25 @@ public/index.html   대시보드 (단일 파일, 빌드 없음)
 | `POST /api/watches/:id/toggle` | 켜기/끄기 |
 | `DELETE /api/watches/:id` | 삭제 |
 | `POST /api/collect` | 수동 수집 |
+
+### 1-d. 발굴 지표 (v0.4 추가분)
+
+```sql
+create table if not exists public.yt_channels (
+  channel_id text primary key,
+  title text,
+  subscriber_count bigint default 0,
+  recent_median_views bigint default 0,
+  updated_at timestamptz default now()
+);
+```
+
+| 지표 | 식 |
+|---|---|
+| 침투력 | 조회수 / 구독자수 (1.0 초과 = 구독자 밖으로 확산) |
+| 참여율 | (좋아요 + 댓글×3) / 조회수 × 100 (%) |
+| 채널활력 | 최근 90일 조회수 중앙값 / 구독자수 |
+| 발굴점수 | 배율 × 침투력 × (1 + 참여율/5) |
+
+상수는 `server.js` 상단 `METRIC` 에서 조정합니다.
+구독자 수는 `channels.list` 로 하루 1회 갱신합니다 (50개당 1유닛).

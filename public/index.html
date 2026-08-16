@@ -101,6 +101,18 @@
     padding: 7px 10px; font-size: 13.5px; background: var(--surface);
   }
   .idea { flex: none; white-space: nowrap; }
+
+  .metrics {
+    display: flex; gap: 5px; flex: none; flex-wrap: wrap;
+    justify-content: flex-end; max-width: 250px;
+  }
+  .m {
+    font-size: 10.5px; font-weight: 600; padding: 2px 7px;
+    border-radius: 999px; white-space: nowrap;
+    background: #f1efe8; color: #444441;
+  }
+  .m-hot { background: #fbeaf0; color: #72243e; }
+  .m-dead { background: #faeeda; color: #633806; }
   .hits { font-size: 11px; color: var(--accent); flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .sec { font-size: 13px; font-weight: 700; margin: 22px 0 8px; }
@@ -156,6 +168,7 @@ let tab = 'dig'
 let settings = { trendingOn: false, channels: [] }
 let digPeriod = 'all'
 let digChannel = 'all'
+let digSort = 'dig'
 
 // 유튜브 영상 카테고리 (KR 주요 항목)
 const YT_CATEGORIES = [
@@ -216,9 +229,13 @@ async function render() {
   panel.innerHTML = '<p class="muted">불러오는 중...</p>'
   try {
     if (tab === 'dig') {
-      const rows = await api(`/api/dig?period=${digPeriod}&channel=${encodeURIComponent(digChannel)}`)
+      const rows = await api(`/api/dig?period=${digPeriod}&channel=${encodeURIComponent(digChannel)}&sort=${digSort}`)
       panel.innerHTML = `
         <div class="filters">
+          <select id="f-sort">
+            ${[['dig', '발굴점수순'], ['reach', '침투력순'], ['engage', '참여율순'], ['multiple', '배율순']]
+              .map(([v, t]) => `<option value="${v}" ${digSort === v ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
           <select id="f-period">
             ${[['all', '전체 (6개월~3년)'], ['6m-1y', '6개월~1년'], ['1y-2y', '1~2년'], ['2y+', '2년 이상']]
               .map(([v, t]) => `<option value="${v}" ${digPeriod === v ? 'selected' : ''}>${t}</option>`).join('')}
@@ -230,12 +247,19 @@ async function render() {
           <span class="muted">${rows.length}건</span>
         </div>
         ${rows.length ? rows.map((v) => videoRow(v, `
-            <span class="badge b-mult">x${(v.multiple ?? 0).toFixed(1)}</span>
+            <span class="metrics">
+              <span class="m">x${(v.multiple ?? 0).toFixed(1)}</span>
+              <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}</span>
+              <span class="m">참여 ${v.engage.toFixed(1)}%</span>
+              ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
+              ${v.dead_channel ? '<span class="m m-dead">⚠️</span>' : ''}
+            </span>
             <button class="btn-ghost btn-sm idea" data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}">아이디어로</button>
           `)).join('')
           : `<p class="empty">조건에 맞는 영상이 없어요. 백카탈로그가 더 쌓이면 나타납니다.
                (배율은 채널당 영상 5개 이상 모여야 계산됩니다)</p>`}
       `
+      $('#f-sort').onchange = (e) => { digSort = e.target.value; render() }
       $('#f-period').onchange = (e) => { digPeriod = e.target.value; render() }
       $('#f-channel').onchange = (e) => { digChannel = e.target.value; render() }
       panel.querySelectorAll('.idea').forEach((b) => {
