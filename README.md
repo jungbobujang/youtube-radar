@@ -469,3 +469,105 @@ alter table public.yt_watches add column if not exists format_override text
 `null` 이면 재생시간으로 자동 판별하고, 값이 있으면 길이와 무관하게 그 형식으로 봅니다.
 1분짜리를 정규 콘텐츠로 올리는 채널처럼 길이로 갈리지 않는 경우를 위한 장치입니다.
 `recompute_multiples` 도 이 오버라이드를 반영해 형식별 중앙값을 나눕니다.
+
+### 1-j. 에버그린 · 토론성 · 주제 포화도 (v1.0)
+
+지표 3종이 추가됩니다. **토론성은 SQL 없이 바로 동작**하고(이미 있는 컬럼만 씁니다),
+**에버그린과 포화도는 아래 함수 2개가 필요**합니다. 함수가 없으면 서버는 죽지 않고
+경고만 남긴 뒤 해당 지표를 비워 둡니다.
+
+| 지표 | 식 | 표시 |
+|---|---|---|
+| 에버그린 | 일평균 = 조회수 / 게시 후 경과일<br>최근 증가량 = 최신 스냅샷 − 7일 전 근처 스냅샷 | `일평균 1.2천 · 최근7일 +3.4천` |
+| 토론성 | 댓글 / 좋아요 ≥ `DEBATE_RATIO`(0.15) | 🗣️ 토론형 |
+| 주제 포화도 | 핵심어를 최근 90일에 다룬 **다른 채널 수** | ✅ 최근 재탕 없음 / ⚠️ 최근 N개 채널이 다룸 |
+
+스냅샷이 2개 미만이면 증가량을 낼 수 없어 `측정 중` 으로 표시됩니다(일평균은 나옵니다).
+포화도는 1건일 때 아무것도 그리지 않습니다 — 우연일 수 있어 0건(공백)과 2건 이상(경쟁)만 신호로 봅니다.
+
+**(1) 최근 증가량** — 스냅샷을 PostgREST 로 긁어오면 후보 수백 건 × 영상당 수십 행이
+기본 1000행 상한에 조용히 잘려 증가량이 틀립니다. DB 안에서 계산합니다.
+
+```sql
+create or replace function public.video_velocity(ids text[], window_days int default 7)
+returns table (
+  video_id text, snaps int,
+  latest_views bigint, latest_at timestamptz,
+  prev_views bigint, prev_at timestamptz
+)
+language sql
+stable
+as $$
+  with s as (
+    select sn.video_id, sn.views, sn.captured_at
+      from public.yt_snapshots sn
+     where sn.video_id = any(ids)
+  ),
+  latest as (
+    select distinct on (s.video_id) s.video_id, s.views, s.captured_at
+      from s
+     order by s.video_id, s.captured_at desc
+  ),
+  cnt as (
+    select s.video_id, count(*)::int as n
+      from s
+     group by s.video_id
+  ),
+  prev as (
+    -- 최신 스냅샷을 뺀 나머지 중 'N일 전' 에 시간상 가장 가까운 한 건
+    select distinct on (s.video_id) s.video_id, s.views, s.captured_at
+      from s
+      join latest l on l.video_id = s.video_id
+     where s.captured_at < l.captured_at
+     order by s.video_id,
+              abs(extract(epoch from
+                (s.captured_at - (l.captured_at - make_interval(days => window_days)))))
+  )
+  select l.video_id, c.n, l.views, l.captured_at, p.views, p.captured_at
+    from latest l
+    join cnt c on c.video_id = l.video_id
+    left join prev p on p.video_id = l.video_id;
+$$;
+```
+
+**(2) 주제 포화도** — 영상마다 `ilike` 를 따로 던지면 80건에 80왕복입니다.
+핵심어를 묶어 한 번에 넘깁니다.
+
+```sql
+create extension if not exists pg_trgm;
+create index if not exists yt_videos_title_trgm
+  on public.yt_videos using gin (title gin_trgm_ops);
+
+create or replace function public.topic_saturation(payload jsonb, window_days int default 90)
+returns table (video_id text, channels int)
+language sql
+stable
+as $$
+  select x.video_id,
+         (select count(distinct v.channel_id)::int
+            from public.yt_videos v
+           where v.channel_id is not null
+             and v.channel_id is distinct from x.channel_id
+             and v.published_at >= now() - make_interval(days => window_days)
+             and v.score >= 0
+             -- 핵심어에 %, _ 가 섞여 들어오면(예: "199% 올리는") 와일드카드로 새니 막는다
+             and v.title ilike '%' ||
+                 replace(replace(replace(x.keyword, '\', '\\'), '%', '\%'), '_', '\_')
+                 || '%')
+    from jsonb_to_recordset(payload)
+      as x(video_id text, channel_id text, keyword text)
+   where length(coalesce(x.keyword, '')) >= 2;
+$$;
+```
+
+`pg_trgm` 인덱스가 없어도 동작하지만, 영상이 쌓이면 `ilike` 전수 스캔이 느려집니다.
+
+> **참고 — 발굴 탭의 '측정 중'**
+> 백카탈로그로 들어온 과거 영상은 수집 때 스냅샷이 **1개만** 남습니다.
+> 신작 수집(최근 25개)에 다시 걸리지 않는 한 두 번째 스냅샷이 쌓이지 않아
+> 발굴 탭에서는 대부분 `측정 중` 으로 보입니다. 신작·모아보기 탭은 정상 동작합니다.
+> 발굴 대상까지 추이를 보려면 수집 때 과거 영상 통계를 다시 읽는 단계가 따로 필요합니다
+> (`videos.list` 50개당 1유닛).
+
+상수는 `server.js` 상단 `METRIC` 에서 조정합니다
+(`DEBATE_RATIO`, `VELOCITY_WINDOW_D`, `SATURATION_WINDOW_D`, `SATURATION_WARN`).

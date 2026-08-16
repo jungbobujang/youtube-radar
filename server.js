@@ -200,20 +200,31 @@ const METRIC = {
   DEAD_CHANNEL: 0.05,     // 채널활력이 이 아래면 ⚠️ (죽은 채널의 과거 영광)
   HOT_ENGAGE_PCTL: 0.75,  // 참여율 상위 25% 에 💬 진한반응
   CHANNEL_TTL_H: 24,      // 구독자 수 갱신 주기(시간)
-  MEDIAN_WINDOW_D: 90     // 채널활력용 최근 N일
+  MEDIAN_WINDOW_D: 90,    // 채널활력용 최근 N일
+  DEBATE_RATIO: 0.15,     // 댓글/좋아요가 이 위면 🗣️ 토론형
+  VELOCITY_WINDOW_D: 7,   // 에버그린 최근 증가량 창(일)
+  SATURATION_WINDOW_D: 90,// 주제 포화도를 볼 최근 N일
+  SATURATION_WARN: 2      // 다른 채널 이만큼부터 ⚠️ 재탕 경고
 }
 
 function deriveMetrics(v, channel) {
   const views = Number(v.views ?? 0)
+  const likes = Number(v.like_count ?? 0)
+  const comments = Number(v.comment_count ?? 0)
   const subs = Number(channel?.subscriber_count ?? 0)
   const recentMedian = Number(channel?.recent_median_views ?? 0)
 
   const reach = subs > 0 ? views / subs : null                 // 침투력
   const engage = views > 0
-    ? ((Number(v.like_count ?? 0) + Number(v.comment_count ?? 0) * METRIC.COMMENT_WEIGHT) / views) * 100
+    ? ((likes + comments * METRIC.COMMENT_WEIGHT) / views) * 100
     : 0                                                        // 참여율 %
   const vitality = subs > 0 ? recentMedian / subs : null       // 채널활력
   const multiple = Number(v.multiple ?? 0)
+
+  // 토론성 — 좋아요 대비 댓글. 참여율(💬 진한반응)과는 다른 축이다.
+  // 참여율은 "반응이 많은가", 토론성은 "그 반응이 말로 나오는가" 를 본다.
+  // 좋아요가 0 이면 대개 표시가 꺼진 영상이라 비율을 내지 않는다.
+  const debate = likes > 0 ? comments / likes : null
 
   // 구독자 수를 아직 모르면 침투력을 1로 두어 배율·참여율만으로 점수를 낸다
   const digScore =
@@ -226,8 +237,78 @@ function deriveMetrics(v, channel) {
     engage: Number(engage.toFixed(2)),
     vitality: vitality == null ? null : Number(vitality.toFixed(4)),
     dig_score: Number(digScore.toFixed(2)),
-    dead_channel: vitality != null && vitality < METRIC.DEAD_CHANNEL
+    dead_channel: vitality != null && vitality < METRIC.DEAD_CHANNEL,
+    debate_ratio: debate == null ? null : Number(debate.toFixed(3)),
+    debate: debate != null && debate >= METRIC.DEBATE_RATIO
   }
+}
+
+// ---------------------------------------------------------------- 에버그린
+
+// 일평균 조회수 + 스냅샷 기반 최근 N일 증가량.
+//
+// 스냅샷을 PostgREST 로 긁어오면 안 된다. 후보 수백 건 × 영상당 스냅샷 수십 행이면
+// 기본 1000행 상한에 조용히 잘려 증가량이 틀린다. DB 함수 한 번으로 끝낸다.
+async function velocityMap(ids) {
+  if (ids.length === 0) return new Map()
+  const { data, error } = await supabase.rpc('video_velocity', {
+    ids, window_days: METRIC.VELOCITY_WINDOW_D
+  })
+  if (error) {
+    console.warn(`[metric] 최근 속도 계산 실패(함수 없음?): ${error.message}`)
+    return new Map()
+  }
+  return new Map((data ?? []).map((r) => [r.video_id, r]))
+}
+
+// 스냅샷이 2개 미만이면 증가량을 못 낸다 ('측정 중'). 일평균은 스냅샷 없이도 나온다.
+function attachEvergreen(rows, vel) {
+  for (const v of rows) {
+    const days = v.published_at
+      ? Math.max((Date.now() - new Date(v.published_at)) / DAY, 1)
+      : null
+    v.avg_daily_views = days == null ? null : Math.round(Number(v.views ?? 0) / days)
+
+    const r = vel.get(v.video_id)
+    const measured = r && Number(r.snaps ?? 0) >= 2 && r.prev_views != null
+    v.velocity_pending = !measured
+    v.recent_delta = measured ? Number(r.latest_views) - Number(r.prev_views) : null
+  }
+  return rows
+}
+
+// ---------------------------------------------------------------- 주제 포화도
+
+// 이 영상의 핵심어를 다른 채널이 최근에 몇 곳이나 다뤘는지.
+// 영상마다 ilike 를 따로 던지면 80건에 80왕복이라, 핵심어를 묶어 DB 함수로 넘긴다.
+async function saturationMap(rows) {
+  const payload = rows
+    .map((v) => ({
+      video_id: v.video_id,
+      channel_id: v.channel_id,
+      keyword: extractKeywords(v.title)[0] ?? ''
+    }))
+    .filter((x) => x.keyword.length >= 2)
+  if (payload.length === 0) return new Map()
+
+  const { data, error } = await supabase.rpc('topic_saturation', {
+    payload, window_days: METRIC.SATURATION_WINDOW_D
+  })
+  if (error) {
+    console.warn(`[metric] 주제 포화도 계산 실패(함수 없음?): ${error.message}`)
+    return new Map()
+  }
+  return new Map((data ?? []).map((r) => [r.video_id, Number(r.channels ?? 0)]))
+}
+
+// 핵심어를 못 뽑았거나 함수가 없으면 null 로 두어 화면에서 아무것도 그리지 않는다
+async function attachSaturation(rows) {
+  const sat = await saturationMap(rows)
+  for (const v of rows) {
+    const n = sat.get(v.video_id)
+    v.saturation = n == null ? null : n
+  }
+  return rows
 }
 
 // 구독자 수와 최근 90일 조회수 중앙값. 하루 1회만 갱신한다 (channels.list = 1유닛/50개)
@@ -851,11 +932,15 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       : Infinity
     for (const r of rows) r.hot_engage = r.engage >= cut && r.engage > 0
 
+    // 정렬 기준이 될 수 있으므로 줄 세우기 전에 붙인다
+    attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
+
     const SORTS = {
       dig: (a, b) => b.dig_score - a.dig_score,
       reach: (a, b) => (b.reach ?? -1) - (a.reach ?? -1),
       engage: (a, b) => b.engage - a.engage,
-      multiple: (a, b) => (b.multiple ?? 0) - (a.multiple ?? 0)
+      multiple: (a, b) => (b.multiple ?? 0) - (a.multiple ?? 0),
+      velocity: (a, b) => (b.recent_delta ?? -1) - (a.recent_delta ?? -1)
     }
     rows.sort(SORTS[req.query.sort] ?? SORTS.dig)
 
@@ -870,7 +955,8 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       })
     }
 
-    res.json(out.slice(0, 80))
+    // 포화도는 화면에 나갈 것만 본다 (제목 ilike 라 후보 전체에 돌리면 비싸다)
+    res.json(await attachSaturation(out.slice(0, 80)))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -905,12 +991,15 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
 
     const chans = await channelMap()
     const overrides = await formatOverrides()
-    res.json((data ?? [])
+    const rows = (data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
       .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
       .filter((v) => format === 'all' || v.format === format)
       .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
-      .slice(0, 80))
+      .slice(0, 80)
+
+    attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
+    res.json(await attachSaturation(rows))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -1049,7 +1138,10 @@ app.get('/api/starred', requireAuth, async (req, res) => {
       .limit(200)
     if (error) throw error
     const chans = await channelMap()
-    res.json((data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) })))
+    const rows = (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+
+    attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
+    res.json(await attachSaturation(rows))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

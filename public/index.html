@@ -104,7 +104,7 @@
 
   .metrics {
     display: flex; gap: 5px; flex: none; flex-wrap: wrap;
-    justify-content: flex-end; max-width: 250px;
+    justify-content: flex-end; max-width: 320px;
   }
   .m {
     font-size: 10.5px; font-weight: 600; padding: 2px 7px;
@@ -113,6 +113,9 @@
   }
   .m-hot { background: #fbeaf0; color: #72243e; }
   .m-dead { background: #faeeda; color: #633806; }
+  .m-debate { background: #e6f1fb; color: #0c447c; }
+  .m-fresh { background: #e1f5ee; color: #085041; }
+  .m-sat { background: #faeeda; color: #633806; }
 
   .star {
     background: none; border: none; padding: 0 3px; flex: none;
@@ -293,6 +296,16 @@ const YT_CATEGORIES = [
 ]
 
 const fmt = (n) => Number(n || 0).toLocaleString('ko-KR')
+
+// 뱃지 안에 들어갈 짧은 수 (1234 -> 1.2천)
+function shortNum(n) {
+  const v = Number(n || 0)
+  const abs = Math.abs(v)
+  if (abs >= 1e8) return `${(v / 1e8).toFixed(1)}억`
+  if (abs >= 1e4) return `${(v / 1e4).toFixed(1)}만`
+  if (abs >= 1e3) return `${(v / 1e3).toFixed(1)}천`
+  return String(Math.round(v))
+}
 const day = (iso) => iso ? new Date(iso).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }) : ''
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
 
@@ -335,12 +348,32 @@ function videoRow(v, extra = '', opts = {}) {
   <div class="relpanel hide" data-panel="${esc(v.video_id)}"></div>`
 }
 
+// 일평균 조회수 + 최근 N일 증가량. 스냅샷이 2개 미만이면 증가량만 '측정 중'.
+function evergreenChip(v) {
+  if (v.avg_daily_views == null) return ''
+  const recent = v.velocity_pending
+    ? '측정 중'
+    : `최근7일 ${v.recent_delta >= 0 ? '+' : '−'}${shortNum(Math.abs(v.recent_delta))}`
+  return `<span class="m">일평균 ${shortNum(v.avg_daily_views)} · ${recent}</span>`
+}
+
+// 1건은 우연일 수 있어 표시하지 않는다. 0건(공백)과 2건 이상(경쟁)만 신호로 본다.
+function saturationChip(v) {
+  if (v.saturation == null) return ''
+  if (v.saturation === 0) return '<span class="m m-fresh">✅ 최근 재탕 없음</span>'
+  if (v.saturation >= 2) return `<span class="m m-sat">⚠️ 최근 ${v.saturation}개 채널이 다룸</span>`
+  return ''
+}
+
 function metricBadges(v) {
   return `<span class="metrics">
     <span class="m">x${(v.multiple ?? 0).toFixed(1)}</span>
     <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}</span>
     <span class="m">참여 ${(v.engage ?? 0).toFixed(1)}%</span>
     ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
+    ${v.debate ? '<span class="m m-debate">🗣️ 토론형</span>' : ''}
+    ${evergreenChip(v)}
+    ${saturationChip(v)}
     ${v.dead_channel ? '<span class="m m-dead">⚠️</span>' : ''}
   </span>`
 }
@@ -453,7 +486,8 @@ async function render() {
         <div class="filters">
           ${filterBar(`
             <select id="f-sort">
-              ${[['dig', '발굴점수순'], ['reach', '침투력순'], ['engage', '참여율순'], ['multiple', '배율순']]
+              ${[['dig', '발굴점수순'], ['reach', '침투력순'], ['engage', '참여율순'],
+                 ['multiple', '배율순'], ['velocity', '최근 속도순']]
                 .map(([v, t]) => `<option value="${v}" ${digSort === v ? 'selected' : ''}>${t}</option>`).join('')}
             </select>
             <select id="f-period">
