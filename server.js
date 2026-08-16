@@ -58,7 +58,39 @@ async function fetchVideoDetails(ids) {
 
 // ---------------------------------------------------------------- 저장
 
-async function saveVideos(items, source) {
+// ---------------------------------------------------------------- 채점
+
+const EXCLUDED = -999
+
+// 제목에 걸린 관심 키워드 목록
+function matchedKeywords(title, includeKws) {
+  const lower = (title ?? '').toLowerCase()
+  return includeKws.filter((k) => lower.includes(k.toLowerCase()))
+}
+
+function scoreVideo(video, cfg, source) {
+  const title = video.snippet?.title ?? ''
+  const lower = title.toLowerCase()
+
+  // 제외 키워드는 다른 점수를 다 무시하고 잘라낸다
+  if (cfg.excludeKws.some((k) => lower.includes(k.toLowerCase()))) return EXCLUDED
+
+  // 카테고리 필터가 하나라도 걸려 있으면 급상승은 그 안에서만 본다
+  if (
+    source === 'trending' &&
+    cfg.categoryIds.length > 0 &&
+    !cfg.categoryIds.includes(String(video.snippet?.categoryId ?? ''))
+  ) {
+    return EXCLUDED
+  }
+
+  let score = matchedKeywords(title, cfg.includeKws).length * 30
+  if (source.startsWith('channel:')) score += 40
+  else if (source.startsWith('keyword:')) score += 30
+  return score
+}
+
+async function saveVideos(items, source, cfg) {
   if (items.length === 0) return 0
 
   const videoRows = items.map((v) => ({
@@ -67,6 +99,8 @@ async function saveVideos(items, source) {
     channel_id: v.snippet?.channelId ?? null,
     channel_title: v.snippet?.channelTitle ?? null,
     published_at: v.snippet?.publishedAt ?? null,
+    category_id: v.snippet?.categoryId ?? null,
+    score: scoreVideo(v, cfg, source),
     source
   }))
 
@@ -97,21 +131,7 @@ async function collect() {
   const report = { trending: 0, watches: 0, videos: 0, errors: [] }
   console.log('[collect] 시작')
 
-  // a. 인기 급상승 — videos.list 는 통계까지 함께 온다 (1 유닛)
-  try {
-    const data = await ytGet('videos', {
-      part: 'snippet,statistics',
-      chart: 'mostPopular',
-      regionCode: 'KR',
-      maxResults: 50
-    })
-    report.trending = await saveVideos(data.items ?? [], 'trending')
-  } catch (err) {
-    console.error('[collect] 인기 급상승 실패:', err.message)
-    report.errors.push(`인기 급상승: ${err.message}`)
-  }
-
-  // b. 감시 대상
+  // 채점에 쓸 설정을 먼저 읽는다 (급상승 카테고리 필터가 여기 달려 있다)
   let watches = []
   try {
     const { data, error } = await supabase
@@ -123,9 +143,30 @@ async function collect() {
     report.errors.push(`감시 목록: ${err.message}`)
   }
 
+  const cfg = {
+    includeKws: watches.filter((w) => w.type === 'include_kw').map((w) => w.value),
+    excludeKws: watches.filter((w) => w.type === 'exclude_kw').map((w) => w.value),
+    categoryIds: watches.filter((w) => w.type === 'category').map((w) => String(w.value))
+  }
+
+  // a. 인기 급상승 — videos.list 는 통계까지 함께 온다 (1 유닛)
+  try {
+    const data = await ytGet('videos', {
+      part: 'snippet,statistics',
+      chart: 'mostPopular',
+      regionCode: 'KR',
+      maxResults: 50
+    })
+    report.trending = await saveVideos(data.items ?? [], 'trending', cfg)
+  } catch (err) {
+    console.error('[collect] 인기 급상승 실패:', err.message)
+    report.errors.push(`인기 급상승: ${err.message}`)
+  }
+
   const since = new Date(Date.now() - 14 * 864e5).toISOString()
 
   for (const w of watches) {
+    if (w.type !== 'keyword' && w.type !== 'channel') continue // 나머지는 채점용 설정
     // 한 감시 대상이 실패해도 나머지는 계속한다
     try {
       const params = {
@@ -149,7 +190,7 @@ async function collect() {
       if (ids.length === 0) continue
 
       const details = await fetchVideoDetails(ids)
-      report.videos += await saveVideos(details, `${w.type}:${w.value}`)
+      report.videos += await saveVideos(details, `${w.type}:${w.value}`, cfg)
       report.watches++
     } catch (err) {
       console.error(`[collect] 감시 "${w.label || w.value}" 실패:`, err.message)
@@ -215,6 +256,7 @@ async function buildTracking(limit = 60) {
   const { data: videos, error } = await supabase
     .from('yt_videos')
     .select('*')
+    .gte('score', 0) // 걸러진 영상은 추이만 쌓고 화면에는 내보내지 않는다
     .order('first_seen_at', { ascending: false })
     .limit(limit)
   if (error) throw error
@@ -304,6 +346,7 @@ app.get('/api/discover', requireAuth, async (req, res) => {
     const { data: videos, error } = await supabase
       .from('yt_videos')
       .select('*')
+      .gte('score', 0)
       .gte('first_seen_at', since)
       .order('first_seen_at', { ascending: false })
       .limit(40)
@@ -329,6 +372,41 @@ app.get('/api/discover', requireAuth, async (req, res) => {
   }
 })
 
+app.get('/api/radar', requireAuth, async (req, res) => {
+  try {
+    const { data: videos, error } = await supabase
+      .from('yt_videos')
+      .select('*')
+      .gte('score', 30)
+      .order('score', { ascending: false })
+      .order('first_seen_at', { ascending: false })
+      .limit(60)
+    if (error) throw error
+    if (!videos?.length) return res.json([])
+
+    const { data: kws } = await supabase
+      .from('yt_watches').select('value').eq('type', 'include_kw').eq('active', true)
+    const includeKws = (kws ?? []).map((k) => k.value)
+
+    const { data: snaps } = await supabase
+      .from('yt_snapshots')
+      .select('video_id, views, captured_at')
+      .in('video_id', videos.map((v) => v.video_id))
+      .order('captured_at', { ascending: false })
+
+    const latest = {}
+    for (const s of snaps ?? []) if (!(s.video_id in latest)) latest[s.video_id] = s.views
+
+    res.json(videos.map((v) => ({
+      ...v,
+      views: latest[v.video_id] ?? 0,
+      hits: matchedKeywords(v.title, includeKws)
+    })))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.get('/api/tracking', requireAuth, async (req, res) => {
   try {
     res.json(await buildTracking())
@@ -347,7 +425,8 @@ app.get('/api/watches', requireAuth, async (req, res) => {
 app.post('/api/watches', requireAuth, async (req, res) => {
   try {
     const { type, value, label } = req.body ?? {}
-    if (!['keyword', 'channel'].includes(type) || !value?.trim()) {
+    const TYPES = ['keyword', 'channel', 'include_kw', 'exclude_kw', 'category']
+    if (!TYPES.includes(type) || !value?.trim()) {
       return res.status(400).json({ error: '입력을 확인해 주세요' })
     }
 

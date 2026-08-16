@@ -92,6 +92,27 @@
   .empty, .muted { color: var(--ink-faint); font-size: 13px; }
   .err { color: var(--danger); font-size: 13px; }
 
+  .b-score { background: #e6f1fb; color: #0c447c; }
+  .hits { font-size: 11px; color: var(--accent); flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+  .sec { font-size: 13px; font-weight: 700; margin: 22px 0 8px; }
+  .sec .muted { font-weight: 400; }
+
+  .kws { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 4px; }
+  .kw {
+    display: inline-flex; align-items: center; gap: 6px;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: 999px; padding: 4px 6px 4px 11px; font-size: 13px;
+  }
+  .kw button {
+    background: none; border: none; padding: 0 3px;
+    color: var(--ink-faint); font-size: 12px; line-height: 1;
+  }
+  .kw button:hover { color: var(--danger); }
+
+  .cats { display: flex; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 6px; }
+  .cat { display: flex; align-items: center; gap: 5px; font-size: 13.5px; }
+
   .gate { max-width: 320px; margin: 18vh auto; text-align: center; }
   .gate input {
     width: 100%; border: 1px solid var(--line); border-radius: var(--radius);
@@ -117,7 +138,8 @@
   </div>
 
   <div class="tabs">
-    <button class="tab tab-on" data-tab="discover">🔥 오늘의 발견</button>
+    <button class="tab tab-on" data-tab="radar">🎯 내 레이더</button>
+    <button class="tab" data-tab="discover">🔥 급상승 전체</button>
     <button class="tab" data-tab="tracking">📈 추적 중</button>
     <button class="tab" data-tab="watches">⚙️ 감시 관리</button>
   </div>
@@ -127,7 +149,23 @@
 
 <script>
 const $ = (s) => document.querySelector(s)
-let tab = 'discover'
+let tab = 'radar'
+
+// 유튜브 영상 카테고리 (KR 주요 항목)
+const YT_CATEGORIES = [
+  { id: '27', name: '교육' },
+  { id: '26', name: '노하우/스타일' },
+  { id: '22', name: '인물/블로그' },
+  { id: '28', name: '과학기술' },
+  { id: '25', name: '뉴스/정치' },
+  { id: '24', name: '엔터테인먼트' },
+  { id: '10', name: '음악' },
+  { id: '20', name: '게임' },
+  { id: '17', name: '스포츠' },
+  { id: '23', name: '코미디' },
+  { id: '19', name: '여행/이벤트' },
+  { id: '15', name: '동물' }
+]
 
 const fmt = (n) => Number(n || 0).toLocaleString('ko-KR')
 const day = (iso) => iso ? new Date(iso).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }) : ''
@@ -165,6 +203,18 @@ async function render() {
   const panel = $('#panel')
   panel.innerHTML = '<p class="muted">불러오는 중...</p>'
   try {
+    if (tab === 'radar') {
+      const rows = await api('/api/radar')
+      panel.innerHTML = rows.length
+        ? rows.map((v) => videoRow(v, `
+            ${v.hits?.length ? `<span class="hits">${v.hits.map(esc).join(' · ')}</span>` : ''}
+            <span class="badge b-score">${v.score}점</span>
+          `)).join('')
+        : `<p class="empty">조건에 맞는 영상이 아직 없어요.
+             <b>⚙️ 감시 관리</b>에서 관심 키워드나 채널을 등록해 보세요.</p>`
+      return
+    }
+
     if (tab === 'discover') {
       const rows = await api('/api/discover')
       panel.innerHTML = rows.length
@@ -185,25 +235,39 @@ async function render() {
     }
 
     const { watches, lastRun } = await api('/api/watches')
-    const active = watches.filter((w) => w.active).length
+    const of = (t) => watches.filter((w) => w.type === t)
+    // 할당량을 쓰는 건 search.list 를 부르는 keyword/channel 뿐이다
+    const costing = watches.filter((w) => w.active && ['keyword', 'channel'].includes(w.type)).length
+    const pickedCats = of('category').map((w) => String(w.value))
+
+    const chipList = (type, icon) => of(type).length
+      ? of(type).map((w) => `
+          <span class="kw ${w.active ? '' : 'off'}">
+            ${icon} ${esc(w.value)}
+            <button data-del="${w.id}" aria-label="삭제">✕</button>
+          </span>`).join('')
+      : '<span class="empty">없음</span>'
+
     panel.innerHTML = `
       <div class="notice">
         <b>API 할당량 주의</b> — YouTube Data API는 하루 10,000 유닛입니다.
-        키워드·채널 감시는 1건당 <b>search.list 100유닛</b>을 쓰고 3시간마다(하루 8회) 돌기 때문에,
-        감시 대상은 <b>10개 이하</b>를 권장합니다. 현재 활성 <b>${active}개</b> → 하루 약 ${fmt(active * 100 * 8)} 유닛.
+        <b>키워드·채널 감시</b>는 1건당 <b>search.list 100유닛</b>을 쓰고 3시간마다(하루 8회)
+        돌기 때문에 <b>10개 이하</b>를 권장합니다.
+        현재 <b>${costing}개</b> → 하루 약 ${fmt(costing * 100 * 8)} 유닛.
+        <br>관심/제외 키워드와 카테고리 필터는 <b>추가 호출 없이</b> 채점에만 쓰이므로 할당량과 무관합니다.
       </div>
 
+      <h3 class="sec">🔍 수집 대상 <span class="muted">(할당량 소모)</span></h3>
       <div class="form">
         <select id="w-type">
-          <option value="keyword">키워드</option>
+          <option value="keyword">키워드 검색</option>
           <option value="channel">채널</option>
         </select>
-        <input id="w-value" placeholder="키워드 또는 채널 URL / @핸들 / 채널 ID">
+        <input id="w-value" placeholder="검색어 또는 채널 URL / @핸들 / 채널 ID">
         <button class="btn btn-sm" id="w-add">추가</button>
       </div>
       <p class="err" id="w-err"></p>
-
-      ${watches.length ? watches.map((w) => `
+      ${[...of('keyword'), ...of('channel')].map((w) => `
         <div class="row ${w.active ? '' : 'off'}">
           <div class="meta">
             <span class="title">${w.type === 'keyword' ? '🔍' : '📺'} ${esc(w.label || w.value)}</span>
@@ -212,28 +276,68 @@ async function render() {
           <button class="btn-ghost btn-sm" data-toggle="${w.id}">${w.active ? '끄기' : '켜기'}</button>
           <button class="btn-ghost btn-sm" data-del="${w.id}">삭제</button>
         </div>
-      `).join('') : '<p class="empty">감시 대상이 없어요.</p>'}
+      `).join('') || '<p class="empty">없음</p>'}
+
+      <h3 class="sec">🎯 관심 키워드 <span class="muted">(제목에 걸리면 +30점)</span></h3>
+      <div class="form">
+        <input id="inc-value" placeholder="예: 자기계발">
+        <button class="btn btn-sm" id="inc-add">추가</button>
+      </div>
+      <div class="kws">${chipList('include_kw', '🎯')}</div>
+
+      <h3 class="sec">🚫 제외 키워드 <span class="muted">(걸리면 화면에서 숨김)</span></h3>
+      <div class="form">
+        <input id="exc-value" placeholder="예: 먹방">
+        <button class="btn btn-sm" id="exc-add">추가</button>
+      </div>
+      <div class="kws">${chipList('exclude_kw', '🚫')}</div>
+
+      <h3 class="sec">📂 카테고리 필터 <span class="muted">(선택 시 급상승은 이 안에서만)</span></h3>
+      <div class="cats">
+        ${YT_CATEGORIES.map((c) => `
+          <label class="cat">
+            <input type="checkbox" data-cat="${c.id}" ${pickedCats.includes(c.id) ? 'checked' : ''}>
+            ${esc(c.name)}
+          </label>`).join('')}
+      </div>
+      <p class="muted">아무것도 선택하지 않으면 급상승 전체를 봅니다.</p>
 
       <p class="muted" style="margin-top:14px">
         ${lastRun ? `최근 수집 ${new Date(lastRun.at).toLocaleString('ko-KR')} · 급상승 ${lastRun.trending}건 · 감시 ${lastRun.watches}건${lastRun.errors?.length ? ` · 오류 ${lastRun.errors.length}건` : ''}` : '아직 수집 기록이 없어요.'}
       </p>
     `
 
-    $('#w-add').onclick = async () => {
-      const type = $('#w-type').value
-      const value = $('#w-value').value.trim()
+    const add = async (type, value) => {
       if (!value) return
       try {
         await api('/api/watches', { method: 'POST', body: JSON.stringify({ type, value }) })
         render()
       } catch (e) { $('#w-err').textContent = e.message }
     }
+
+    $('#w-add').onclick = () => add($('#w-type').value, $('#w-value').value.trim())
+    $('#inc-add').onclick = () => add('include_kw', $('#inc-value').value.trim())
+    $('#exc-add').onclick = () => add('exclude_kw', $('#exc-value').value.trim())
+    $('#inc-value').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#inc-add').click() })
+    $('#exc-value').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#exc-add').click() })
+
+    panel.querySelectorAll('[data-cat]').forEach((box) => {
+      box.onchange = async () => {
+        const id = box.dataset.cat
+        const existing = of('category').find((w) => String(w.value) === id)
+        if (box.checked && !existing) await add('category', id)
+        else if (!box.checked && existing) {
+          await api(`/api/watches/${existing.id}`, { method: 'DELETE' })
+          render()
+        }
+      }
+    })
     panel.querySelectorAll('[data-toggle]').forEach((b) => {
       b.onclick = async () => { await api(`/api/watches/${b.dataset.toggle}/toggle`, { method: 'POST' }); render() }
     })
     panel.querySelectorAll('[data-del]').forEach((b) => {
       b.onclick = async () => {
-        if (!confirm('이 감시 대상을 삭제할까요?')) return
+        if (!confirm('삭제할까요?')) return
         await api(`/api/watches/${b.dataset.del}`, { method: 'DELETE' }); render()
       }
     })

@@ -54,6 +54,54 @@ alter table public.yt_videos disable row level security;
 alter table public.yt_snapshots disable row level security;
 ```
 
+### 1-b. 관심사 필터링 (v0.2 추가분)
+
+이미 위 테이블을 만든 상태라면 아래만 추가로 실행하세요.
+
+```sql
+-- 영상에 카테고리와 점수를 기록
+alter table public.yt_videos add column if not exists category_id text;
+alter table public.yt_videos add column if not exists score int default 0;
+
+-- 감시 타입에 채점용 3종 추가
+alter table public.yt_watches drop constraint if exists yt_watches_type_check;
+alter table public.yt_watches add constraint yt_watches_type_check
+  check (type in ('keyword','channel','include_kw','exclude_kw','category'));
+```
+
+기본 관심사 시드 (원하는 것만 골라 실행):
+
+```sql
+insert into public.yt_watches (type, value, label, active) values
+  ('include_kw', '자기계발', '자기계발', true),
+  ('include_kw', '운동',     '운동',     true),
+  ('include_kw', '습관',     '습관',     true),
+  ('include_kw', '외모',     '외모',     true),
+  ('include_kw', '공부법',   '공부법',   true),
+  ('include_kw', '뇌과학',   '뇌과학',   true),
+  ('include_kw', '심리',     '심리',     true),
+  ('include_kw', 'AI',       'AI',       true),
+  ('exclude_kw', 'MV',       'MV',       true),
+  ('exclude_kw', '예고편',   '예고편',   true),
+  ('exclude_kw', '먹방',     '먹방',     true),
+  ('exclude_kw', '직캠',     '직캠',     true);
+```
+
+### 채점 규칙
+
+| 항목 | 점수 |
+|---|---|
+| 제목에 관심 키워드(`include_kw`) 포함 | 개수 × **+30** |
+| 감시 채널(`channel`)에서 발견 | **+40** |
+| 감시 키워드(`keyword`) 검색 결과 | **+30** |
+| 제외 키워드(`exclude_kw`)가 제목에 포함 | **−999** |
+| 카테고리 필터가 있는데 급상승 영상이 그 밖이면 | **−999** |
+
+- `🎯 내 레이더` 탭은 **30점 이상**만 점수순으로 보여줍니다.
+- 점수가 **음수인 영상도 DB 에는 그대로 저장**됩니다. 추이 데이터를 잃지 않기 위해서이고,
+  화면에서만 감춥니다. 나중에 관심사를 바꾸면 과거 데이터가 그대로 살아납니다.
+- 관심/제외 키워드와 카테고리 필터는 **API 를 추가로 부르지 않습니다.** 할당량과 무관합니다.
+
 > 서비스 키는 RLS 를 우회합니다. 접근 통제는 `ACCESS_CODE` 게이트가 담당하므로
 > **서비스 키를 브라우저로 내보내면 안 됩니다.** 이 앱은 서버에서만 사용합니다.
 
@@ -151,6 +199,7 @@ public/index.html   대시보드 (단일 파일, 빌드 없음)
 |---|---|
 | `GET  /api/session` | 쿠키 인증 상태 |
 | `POST /api/login` | 접속 코드 확인, 30일 쿠키 발급 |
+| `GET  /api/radar` | 30점 이상 영상, 점수순 + 걸린 키워드 |
 | `GET  /api/discover` | 최근 2일 내 발견 영상, 조회수순 |
 | `GET  /api/tracking` | 추적 중 영상 + 증가량 + 유형 뱃지 |
 | `GET  /api/watches` | 감시 목록 + 최근 수집 결과 |
