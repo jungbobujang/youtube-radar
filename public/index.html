@@ -1,0 +1,272 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>유튜브 레이더</title>
+<style>
+  :root {
+    --bg: #f4f4f1;
+    --surface: #ffffff;
+    --ink: #22261f;
+    --ink-soft: #5c6157;
+    --ink-faint: #9a9e94;
+    --line: #e3e4de;
+    --accent: #2f6b4f;
+    --danger: #b23a2e;
+    --radius: 10px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font-family: 'Pretendard Variable', Pretendard, -apple-system, sans-serif;
+    font-size: 15px; line-height: 1.6;
+  }
+  button { font: inherit; cursor: pointer; }
+  input, select { font: inherit; }
+
+  .wrap { max-width: 880px; margin: 0 auto; padding: 16px 16px 80px; }
+
+  .topbar { display: flex; align-items: center; justify-content: space-between; padding: 8px 0 16px; }
+  .brand { display: flex; align-items: center; gap: 10px; font-weight: 700; font-size: 17px; }
+  .brand-mark {
+    width: 34px; height: 34px; display: grid; place-items: center;
+    background: var(--ink); color: var(--bg); border-radius: 9px; font-size: 17px;
+  }
+
+  .btn {
+    background: var(--ink); color: #fff; border: none;
+    border-radius: var(--radius); padding: 9px 16px; font-weight: 600;
+  }
+  .btn:disabled { opacity: .5; cursor: default; }
+  .btn-ghost {
+    background: transparent; color: var(--ink-soft);
+    border: 1px solid var(--line); border-radius: var(--radius); padding: 8px 13px;
+  }
+  .btn-sm { padding: 5px 10px; font-size: 13px; }
+
+  .tabs { display: flex; gap: 4px; margin-bottom: 14px; border-bottom: 1px solid var(--line); }
+  .tab {
+    background: none; border: none; border-bottom: 2px solid transparent;
+    padding: 8px 12px; margin-bottom: -1px;
+    font-size: 14px; font-weight: 600; color: var(--ink-faint);
+  }
+  .tab-on { color: var(--ink); border-bottom-color: var(--ink); }
+
+  .row {
+    display: flex; gap: 10px; align-items: center;
+    padding: 10px 0; border-bottom: 1px solid var(--line);
+  }
+  .row:last-child { border-bottom: none; }
+  .thumb { width: 96px; height: 54px; flex: none; border-radius: 6px; object-fit: cover; background: var(--line); }
+  .meta { flex: 1; min-width: 0; }
+  .title {
+    display: block; font-size: 14px; font-weight: 600; color: var(--ink);
+    text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .title:hover { text-decoration: underline; }
+  .sub { font-size: 12px; color: var(--ink-faint); display: flex; gap: 8px; flex-wrap: wrap; }
+
+  .badge {
+    font-size: 11px; font-weight: 600; padding: 2px 9px;
+    border-radius: 999px; white-space: nowrap; flex: none;
+  }
+  .b-short { background: #faece7; color: #712b13; }
+  .b-mid   { background: #faeeda; color: #633806; }
+  .b-long  { background: #e1f5ee; color: #085041; }
+  .b-pending { background: #f1efe8; color: #444441; }
+
+  .delta { font-size: 12px; font-weight: 600; color: var(--accent); flex: none; }
+
+  .notice {
+    background: #faeeda; color: #633806; border-radius: var(--radius);
+    padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px;
+  }
+  .form { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
+  .form input, .form select {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 8px 10px; font-size: 14px; background: var(--surface);
+  }
+  .form input { flex: 1; min-width: 160px; }
+  .off { opacity: .45; }
+  .empty, .muted { color: var(--ink-faint); font-size: 13px; }
+  .err { color: var(--danger); font-size: 13px; }
+
+  .gate { max-width: 320px; margin: 18vh auto; text-align: center; }
+  .gate input {
+    width: 100%; border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 10px 12px; font-size: 15px; margin: 14px 0 10px;
+  }
+  .hide { display: none; }
+</style>
+</head>
+<body>
+
+<div id="gate" class="gate hide">
+  <div class="brand-mark" style="margin: 0 auto 12px;">📡</div>
+  <h1 style="font-size:17px;margin:0">유튜브 레이더</h1>
+  <input id="code" type="password" placeholder="접속 코드" autocomplete="current-password">
+  <button class="btn" id="enter" style="width:100%">들어가기</button>
+  <p id="gate-err" class="err"></p>
+</div>
+
+<div id="app" class="wrap hide">
+  <div class="topbar">
+    <div class="brand"><span class="brand-mark">📡</span> 유튜브 레이더</div>
+    <button class="btn-ghost btn-sm" id="run">지금 수집</button>
+  </div>
+
+  <div class="tabs">
+    <button class="tab tab-on" data-tab="discover">🔥 오늘의 발견</button>
+    <button class="tab" data-tab="tracking">📈 추적 중</button>
+    <button class="tab" data-tab="watches">⚙️ 감시 관리</button>
+  </div>
+
+  <div id="panel"></div>
+</div>
+
+<script>
+const $ = (s) => document.querySelector(s)
+let tab = 'discover'
+
+const fmt = (n) => Number(n || 0).toLocaleString('ko-KR')
+const day = (iso) => iso ? new Date(iso).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' }) : ''
+const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]))
+
+async function api(path, opts) {
+  const res = await fetch(path, { headers: { 'Content-Type': 'application/json' }, ...opts })
+  if (res.status === 401) { showGate(); throw new Error('unauthorized') }
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error || '요청 실패')
+  return data
+}
+
+function showGate() { $('#gate').classList.remove('hide'); $('#app').classList.add('hide') }
+function showApp() { $('#gate').classList.add('hide'); $('#app').classList.remove('hide'); render() }
+
+function videoRow(v, extra = '') {
+  return `<div class="row">
+    <img class="thumb" loading="lazy" src="https://img.youtube.com/vi/${esc(v.video_id)}/mqdefault.jpg" alt="">
+    <div class="meta">
+      <a class="title" href="https://www.youtube.com/watch?v=${esc(v.video_id)}" target="_blank" rel="noopener noreferrer">${esc(v.title)}</a>
+      <div class="sub">
+        <span>${esc(v.channel_title || '')}</span>
+        <span>조회 ${fmt(v.views ?? v.latest)}</span>
+        <span>${day(v.published_at)}</span>
+      </div>
+    </div>
+    ${extra}
+  </div>`
+}
+
+const BADGE_CLASS = { short: 'b-short', mid: 'b-mid', long: 'b-long', pending: 'b-pending' }
+
+async function render() {
+  const panel = $('#panel')
+  panel.innerHTML = '<p class="muted">불러오는 중...</p>'
+  try {
+    if (tab === 'discover') {
+      const rows = await api('/api/discover')
+      panel.innerHTML = rows.length
+        ? rows.map((v) => videoRow(v)).join('')
+        : '<p class="empty">아직 수집된 영상이 없어요. [지금 수집]을 눌러 보세요.</p>'
+      return
+    }
+
+    if (tab === 'tracking') {
+      const rows = await api('/api/tracking')
+      panel.innerHTML = rows.length
+        ? rows.map((v) => videoRow(v, `
+            ${v.delta != null ? `<span class="delta">+${fmt(v.delta)}</span>` : ''}
+            <span class="badge ${BADGE_CLASS[v.kind]}">${esc(v.badge)}</span>
+          `)).join('')
+        : '<p class="empty">추적 중인 영상이 없어요.</p>'
+      return
+    }
+
+    const { watches, lastRun } = await api('/api/watches')
+    const active = watches.filter((w) => w.active).length
+    panel.innerHTML = `
+      <div class="notice">
+        <b>API 할당량 주의</b> — YouTube Data API는 하루 10,000 유닛입니다.
+        키워드·채널 감시는 1건당 <b>search.list 100유닛</b>을 쓰고 3시간마다(하루 8회) 돌기 때문에,
+        감시 대상은 <b>10개 이하</b>를 권장합니다. 현재 활성 <b>${active}개</b> → 하루 약 ${fmt(active * 100 * 8)} 유닛.
+      </div>
+
+      <div class="form">
+        <select id="w-type">
+          <option value="keyword">키워드</option>
+          <option value="channel">채널</option>
+        </select>
+        <input id="w-value" placeholder="키워드 또는 채널 URL / @핸들 / 채널 ID">
+        <button class="btn btn-sm" id="w-add">추가</button>
+      </div>
+      <p class="err" id="w-err"></p>
+
+      ${watches.length ? watches.map((w) => `
+        <div class="row ${w.active ? '' : 'off'}">
+          <div class="meta">
+            <span class="title">${w.type === 'keyword' ? '🔍' : '📺'} ${esc(w.label || w.value)}</span>
+            <div class="sub"><span>${esc(w.value)}</span></div>
+          </div>
+          <button class="btn-ghost btn-sm" data-toggle="${w.id}">${w.active ? '끄기' : '켜기'}</button>
+          <button class="btn-ghost btn-sm" data-del="${w.id}">삭제</button>
+        </div>
+      `).join('') : '<p class="empty">감시 대상이 없어요.</p>'}
+
+      <p class="muted" style="margin-top:14px">
+        ${lastRun ? `최근 수집 ${new Date(lastRun.at).toLocaleString('ko-KR')} · 급상승 ${lastRun.trending}건 · 감시 ${lastRun.watches}건${lastRun.errors?.length ? ` · 오류 ${lastRun.errors.length}건` : ''}` : '아직 수집 기록이 없어요.'}
+      </p>
+    `
+
+    $('#w-add').onclick = async () => {
+      const type = $('#w-type').value
+      const value = $('#w-value').value.trim()
+      if (!value) return
+      try {
+        await api('/api/watches', { method: 'POST', body: JSON.stringify({ type, value }) })
+        render()
+      } catch (e) { $('#w-err').textContent = e.message }
+    }
+    panel.querySelectorAll('[data-toggle]').forEach((b) => {
+      b.onclick = async () => { await api(`/api/watches/${b.dataset.toggle}/toggle`, { method: 'POST' }); render() }
+    })
+    panel.querySelectorAll('[data-del]').forEach((b) => {
+      b.onclick = async () => {
+        if (!confirm('이 감시 대상을 삭제할까요?')) return
+        await api(`/api/watches/${b.dataset.del}`, { method: 'DELETE' }); render()
+      }
+    })
+  } catch (e) {
+    if (e.message !== 'unauthorized') panel.innerHTML = `<p class="err">${esc(e.message)}</p>`
+  }
+}
+
+document.querySelectorAll('.tab').forEach((b) => {
+  b.onclick = () => {
+    tab = b.dataset.tab
+    document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('tab-on', x === b))
+    render()
+  }
+})
+
+$('#run').onclick = async () => {
+  const btn = $('#run')
+  btn.disabled = true; btn.textContent = '수집 중...'
+  try { await api('/api/collect', { method: 'POST' }); await render() }
+  catch (e) { alert(e.message) }
+  btn.disabled = false; btn.textContent = '지금 수집'
+}
+
+$('#enter').onclick = async () => {
+  try {
+    await api('/api/login', { method: 'POST', body: JSON.stringify({ code: $('#code').value }) })
+    showApp()
+  } catch (e) { $('#gate-err').textContent = e.message }
+}
+$('#code').addEventListener('keydown', (e) => { if (e.key === 'Enter') $('#enter').click() })
+
+fetch('/api/session').then((r) => r.json()).then((d) => d.ok ? showApp() : showGate()).catch(showGate)
+</script>
+</body>
+</html>

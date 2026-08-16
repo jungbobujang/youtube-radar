@@ -1,0 +1,20 @@
+{
+  "name": "youtube-radar",
+  "version": "0.1.0",
+  "private": true,
+  "description": "유튜브 인기 급상승 · 키워드 · 채널 감시 레이더",
+  "type": "commonjs",
+  "engines": {
+    "node": ">=20.6"
+  },
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --env-file=.env server.js",
+    "check": "node --check server.js"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.45.0",
+    "express": "^4.19.2",
+    "node-cron": "^3.0.3"
+  }
+}
