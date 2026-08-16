@@ -323,3 +323,46 @@ alter table public.yt_watch_groups enable row level security;
 ```
 
 채널은 여러 그룹에 동시에 속할 수 있습니다. 그룹을 지워도 채널은 남고 연결만 끊깁니다.
+
+### 1-g. 영상 저장 함수 (v0.7)
+
+PostgREST 의 upsert 는 페이로드에 없는 컬럼을 기본값으로 되돌립니다.
+그대로 두면 수집이 돌 때마다 `starred` / `starred_at` / `multiple` 이 사라집니다.
+갱신할 컬럼을 명시한 함수로 저장합니다.
+
+```sql
+create or replace function public.upsert_videos(payload jsonb)
+returns integer
+language plpgsql
+as $$
+declare n integer;
+begin
+  insert into public.yt_videos as v (
+    video_id, title, channel_id, channel_title, published_at,
+    category_id, views, like_count, comment_count, score, source
+  )
+  select
+    x.video_id, x.title, x.channel_id, x.channel_title, x.published_at,
+    x.category_id, x.views, x.like_count, x.comment_count, x.score, x.source
+  from jsonb_to_recordset(payload) as x(
+    video_id text, title text, channel_id text, channel_title text,
+    published_at timestamptz, category_id text, views bigint,
+    like_count bigint, comment_count bigint, score int, source text
+  )
+  on conflict (video_id) do update set
+    title         = excluded.title,
+    channel_title = excluded.channel_title,
+    published_at  = excluded.published_at,
+    category_id   = excluded.category_id,
+    views         = excluded.views,
+    like_count    = excluded.like_count,
+    comment_count = excluded.comment_count,
+    score         = excluded.score,
+    source        = excluded.source;
+  get diagnostics n = row_count;
+  return n;
+end;
+$$;
+```
+
+`starred`, `starred_at`, `multiple`, `first_seen_at` 은 갱신 대상에서 빠져 보존됩니다.

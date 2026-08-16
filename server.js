@@ -126,9 +126,10 @@ async function saveVideos(items, source, cfg) {
     source
   }))
 
-  const { error: vErr } = await supabase
-    .from('yt_videos')
-    .upsert(videoRows, { onConflict: 'video_id' })
+  // PostgREST 의 upsert 는 페이로드에 없는 컬럼을 기본값으로 되돌린다.
+  // 그대로 쓰면 수집이 돌 때마다 starred/starred_at/multiple 이 날아간다.
+  // 갱신할 컬럼을 명시한 DB 함수로 넘긴다.
+  const { error: vErr } = await supabase.rpc('upsert_videos', { payload: videoRows })
   if (vErr) throw vErr
 
   const snapRows = items.map((v) => ({
