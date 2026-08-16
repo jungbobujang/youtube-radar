@@ -856,9 +856,19 @@ app.get('/api/related', requireAuth, async (req, res) => {
       const { data } = await supabase
         .from('yt_videos').select('title').eq('video_id', video_id).single()
       keywords = extractKeywords(data?.title)
-      if (!keyword) keyword = keywords[0] ?? ''
     }
-    res.json({ keyword, keywords, results: await relatedFromDb(keyword, video_id) })
+
+    if (keyword) {
+      return res.json({ keyword, keywords, results: await relatedFromDb(keyword, video_id) })
+    }
+
+    // 명사구를 먼저 시도하되, 조사를 뗀 구가 원문과 안 맞아 0건이면
+    // 다음 후보로 넘어간다. 빈 패널이 뜨는 것보다 낫다.
+    for (const cand of keywords) {
+      const results = await relatedFromDb(cand, video_id)
+      if (results.length > 0) return res.json({ keyword: cand, keywords, results })
+    }
+    res.json({ keyword: keywords[0] ?? '', keywords, results: [] })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

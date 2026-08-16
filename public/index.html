@@ -113,6 +113,36 @@
   }
   .m-hot { background: #fbeaf0; color: #72243e; }
   .m-dead { background: #faeeda; color: #633806; }
+
+  .star {
+    background: none; border: none; padding: 0 3px; flex: none;
+    font-size: 16px; color: var(--line); line-height: 1;
+  }
+  .star:hover { color: #d99a1b; }
+  .star-on { color: #d99a1b; }
+  .rel { flex: none; white-space: nowrap; }
+
+  .relpanel {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 10px 12px; margin: 0 0 10px;
+  }
+  .rel-head { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
+  .rel-kw {
+    flex: 1; min-width: 140px; border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 6px 10px; font-size: 13px;
+  }
+  .rel-kw:focus { border-color: var(--accent); outline: none; }
+  .rel-kws { display: flex; gap: 5px; flex-wrap: wrap; margin-bottom: 8px; }
+  .chip-kw {
+    background: var(--bg); border: 1px solid var(--line); border-radius: 999px;
+    padding: 3px 10px; font-size: 12px; color: var(--ink-soft);
+  }
+  .chip-kw:hover { border-color: var(--ink-faint); }
+  .rel-row { padding: 6px 0; border-bottom: 1px solid var(--line); }
+  .rel-row:last-of-type { border-bottom: none; }
+  .rel-row a { font-size: 13px; color: var(--ink); text-decoration: none; font-weight: 600; }
+  .rel-row a:hover { text-decoration: underline; }
+  .rel-msg { margin: 8px 0 0; font-size: 12px; }
   .hits { font-size: 11px; color: var(--accent); flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .sec { font-size: 13px; font-weight: 700; margin: 22px 0 8px; }
@@ -207,7 +237,11 @@ async function showApp() {
   render()
 }
 
-function videoRow(v, extra = '') {
+function videoRow(v, extra = '', opts = {}) {
+  const tools = opts.noTools ? '' : `
+    <button class="star ${v.starred ? 'star-on' : ''}" data-star="${esc(v.video_id)}"
+            aria-label="즐겨찾기">★</button>
+    <button class="btn-ghost btn-sm rel" data-rel="${esc(v.video_id)}">🔎 관련</button>`
   return `<div class="row">
     <img class="thumb" loading="lazy" src="https://img.youtube.com/vi/${esc(v.video_id)}/mqdefault.jpg" alt="">
     <div class="meta">
@@ -219,7 +253,115 @@ function videoRow(v, extra = '') {
       </div>
     </div>
     ${extra}
-  </div>`
+    ${tools}
+  </div>
+  <div class="relpanel hide" data-panel="${esc(v.video_id)}"></div>`
+}
+
+function metricBadges(v) {
+  return `<span class="metrics">
+    <span class="m">x${(v.multiple ?? 0).toFixed(1)}</span>
+    <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}</span>
+    <span class="m">참여 ${(v.engage ?? 0).toFixed(1)}%</span>
+    ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
+    ${v.dead_channel ? '<span class="m m-dead">⚠️</span>' : ''}
+  </span>`
+}
+
+function ideaButton(v) {
+  return `<button class="btn-ghost btn-sm idea" data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}">아이디어로</button>`
+}
+
+// 목록을 그린 뒤 공통 버튼(⭐ / 🔎 관련 / 아이디어로)을 붙인다
+function wireRows(panel) {
+  panel.querySelectorAll('[data-star]').forEach((b) => {
+    b.onclick = async () => {
+      const on = !b.classList.contains('star-on')
+      b.classList.toggle('star-on', on)
+      try {
+        await api('/api/star', {
+          method: 'POST',
+          body: JSON.stringify({ video_id: b.dataset.star, starred: on })
+        })
+      } catch { b.classList.toggle('star-on', !on) }
+    }
+  })
+
+  panel.querySelectorAll('.idea').forEach((b) => {
+    b.onclick = async () => {
+      const text = `${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}`
+      try { await navigator.clipboard.writeText(text) } catch {
+        const ta = document.createElement('textarea')
+        ta.value = text; document.body.appendChild(ta); ta.select()
+        document.execCommand('copy'); ta.remove()
+      }
+      b.textContent = '복사됨'
+      setTimeout(() => { b.textContent = '아이디어로' }, 1400)
+    }
+  })
+
+  panel.querySelectorAll('[data-rel]').forEach((b) => {
+    b.onclick = () => toggleRelated(panel, b.dataset.rel)
+  })
+}
+
+async function toggleRelated(panel, videoId, keyword) {
+  const box = panel.querySelector(`[data-panel="${CSS.escape(videoId)}"]`)
+  if (!box) return
+  if (!box.classList.contains('hide') && keyword === undefined) {
+    box.classList.add('hide'); box.innerHTML = ''; return
+  }
+  box.classList.remove('hide')
+  box.innerHTML = '<p class="muted">관련 주제 찾는 중...</p>'
+
+  const qs = keyword !== undefined ? `&q=${encodeURIComponent(keyword)}` : ''
+  const data = await api(`/api/related?video_id=${encodeURIComponent(videoId)}${qs}`)
+  drawRelated(box, panel, videoId, data)
+}
+
+function drawRelated(box, panel, videoId, data) {
+  box.innerHTML = `
+    <div class="rel-head">
+      <input class="rel-kw" value="${esc(data.keyword || '')}" placeholder="키워드">
+      <button class="btn btn-sm rel-go">DB에서 찾기</button>
+      <button class="btn-ghost btn-sm rel-yt">유튜브 전체에서 찾기 (할당량 100유닛 사용)</button>
+    </div>
+    ${data.keywords?.length ? `<div class="rel-kws">${data.keywords.map((k) => `<button class="chip-kw">${esc(k)}</button>`).join('')}</div>` : ''}
+    ${data.results.length ? data.results.map((v) => `
+      <div class="rel-row">
+        <a href="https://www.youtube.com/watch?v=${esc(v.video_id)}" target="_blank" rel="noopener noreferrer">${esc(v.title)}</a>
+        <div class="sub">
+          <span>${esc(v.channel_title || '')}</span>
+          <span>조회 ${fmt(v.views)}</span>
+          <span>${day(v.published_at)}</span>
+          <span class="m">x${(v.multiple ?? 0).toFixed(1)}</span>
+        </div>
+      </div>`).join('')
+      : '<p class="muted">DB 안에는 관련 영상이 없어요. 유튜브 전체에서 찾아보세요.</p>'}
+    <p class="rel-msg muted"></p>
+  `
+  const kwInput = box.querySelector('.rel-kw')
+  box.querySelector('.rel-go').onclick = () => toggleRelated(panel, videoId, kwInput.value)
+  kwInput.addEventListener('keydown', (e) => { if (e.key === 'Enter') toggleRelated(panel, videoId, kwInput.value) })
+  box.querySelectorAll('.chip-kw').forEach((c) => {
+    c.onclick = () => toggleRelated(panel, videoId, c.textContent)
+  })
+  box.querySelector('.rel-yt').onclick = async (e) => {
+    const btn = e.currentTarget
+    btn.disabled = true; btn.textContent = '검색 중...'
+    try {
+      const r = await api('/api/related/search', {
+        method: 'POST',
+        body: JSON.stringify({ q: kwInput.value, video_id: videoId })
+      })
+      drawRelated(box, panel, videoId, { ...r, keywords: [] })
+      box.querySelector('.rel-msg').textContent = `${r.saved}건 저장 · 약 ${r.units}유닛 사용`
+    } catch (err) {
+      btn.disabled = false
+      btn.textContent = '유튜브 전체에서 찾기 (할당량 100유닛 사용)'
+      box.querySelector('.rel-msg').textContent = err.message
+    }
+  }
 }
 
 const BADGE_CLASS = { short: 'b-short', mid: 'b-mid', long: 'b-long', pending: 'b-pending' }
@@ -246,45 +388,35 @@ async function render() {
           </select>
           <span class="muted">${rows.length}건</span>
         </div>
-        ${rows.length ? rows.map((v) => videoRow(v, `
-            <span class="metrics">
-              <span class="m">x${(v.multiple ?? 0).toFixed(1)}</span>
-              <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}</span>
-              <span class="m">참여 ${v.engage.toFixed(1)}%</span>
-              ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
-              ${v.dead_channel ? '<span class="m m-dead">⚠️</span>' : ''}
-            </span>
-            <button class="btn-ghost btn-sm idea" data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}">아이디어로</button>
-          `)).join('')
+        ${rows.length ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
           : `<p class="empty">조건에 맞는 영상이 없어요. 백카탈로그가 더 쌓이면 나타납니다.
                (배율은 채널당 영상 5개 이상 모여야 계산됩니다)</p>`}
       `
       $('#f-sort').onchange = (e) => { digSort = e.target.value; render() }
       $('#f-period').onchange = (e) => { digPeriod = e.target.value; render() }
       $('#f-channel').onchange = (e) => { digChannel = e.target.value; render() }
-      panel.querySelectorAll('.idea').forEach((b) => {
-        b.onclick = async () => {
-          const text = `${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}`
-          try {
-            await navigator.clipboard.writeText(text)
-            b.textContent = '복사됨'
-          } catch {
-            const ta = document.createElement('textarea')
-            ta.value = text; document.body.appendChild(ta); ta.select()
-            document.execCommand('copy'); ta.remove()
-            b.textContent = '복사됨'
-          }
-          setTimeout(() => { b.textContent = '아이디어로' }, 1400)
-        }
-      })
+      wireRows(panel)
+      return
+    }
+
+    if (tab === 'starred') {
+      const rows = await api('/api/starred')
+      panel.innerHTML = `
+        <p class="muted" style="margin-top:0">⭐ ${rows.length}건</p>
+        ${rows.length
+          ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
+          : '<p class="empty">아직 즐겨찾기한 영상이 없어요. 목록에서 ★ 을 눌러 담아 보세요.</p>'}
+      `
+      wireRows(panel)
       return
     }
 
     if (tab === 'fresh') {
       const rows = await api('/api/fresh')
       panel.innerHTML = rows.length
-        ? rows.map((v) => videoRow(v, v.multiple ? `<span class="badge b-mult">x${v.multiple.toFixed(1)}</span>` : '')).join('')
+        ? rows.map((v) => videoRow(v, v.multiple ? `<span class="m">x${v.multiple.toFixed(1)}</span>` : '')).join('')
         : '<p class="empty">최근 30일 영상이 없어요.</p>'
+      wireRows(panel)
       return
     }
 
@@ -316,6 +448,7 @@ async function render() {
             <span class="badge ${BADGE_CLASS[v.kind]}">${esc(v.badge)}</span>
           `)).join('')
         : '<p class="empty">추적 중인 영상이 없어요.</p>'
+      wireRows(panel)
       return
     }
 
@@ -447,6 +580,7 @@ async function render() {
 function renderTabs() {
   const defs = [
     ['dig', '💎 발굴'],
+    ['starred', '⭐ 모아보기'],
     ['fresh', '📡 신작'],
     ...(settings.trendingOn ? [['discover', '🔥 급상승']] : []),
     ['tracking', '📈 추적 중'],

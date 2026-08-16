@@ -290,3 +290,14 @@ create table if not exists public.yt_channels (
 
 상수는 `server.js` 상단 `METRIC` 에서 조정합니다.
 구독자 수는 `channels.list` 로 하루 1회 갱신합니다 (50개당 1유닛).
+
+### 1-e. 즐겨찾기·관련 탐색 (v0.5 추가분)
+
+```sql
+alter table public.yt_videos add column if not exists starred boolean default false;
+alter table public.yt_videos add column if not exists starred_at timestamptz;
+create index if not exists yt_videos_starred_idx on public.yt_videos (starred, starred_at desc);
+```
+
+관련 주제 탐색은 기본적으로 **DB 안에서만** 찾습니다(할당량 0).
+`유튜브 전체에서 찾기` 를 누를 때만 `search.list` 1회(100유닛)를 씁니다.
