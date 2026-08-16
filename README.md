@@ -104,6 +104,36 @@ create index if not exists yt_videos_channel_idx on public.yt_videos (channel_id
 create index if not exists yt_videos_published_idx on public.yt_videos (published_at desc);
 ```
 
+배율 계산은 DB 함수로 합니다. 행마다 값이 달라 PostgREST 로는 한 번에 쓸 수 없고,
+upsert 로 우회하면 `NOT NULL` 제약(title 등)에 걸립니다.
+
+```sql
+create or replace function public.recompute_multiples()
+returns integer
+language plpgsql
+as $$
+declare
+  affected integer := 0;
+begin
+  with med as (
+    select channel_id,
+           percentile_cont(0.5) within group (order by views) as m
+    from public.yt_videos
+    where channel_id is not null and views is not null
+    group by channel_id
+    having count(*) >= 5
+  )
+  update public.yt_videos v
+     set multiple = round((v.views::numeric / med.m)::numeric, 2)
+    from med
+   where v.channel_id = med.channel_id
+     and med.m > 0;
+  get diagnostics affected = row_count;
+  return affected;
+end;
+$$;
+```
+
 급상승 수집 on/off 는 `yt_watches` 에 `type='setting', value='trending_on'` 행이 있으면 켜짐,
 없으면 꺼짐입니다. 별도 테이블 없이 감시 관리 화면의 체크박스로 조작합니다.
 

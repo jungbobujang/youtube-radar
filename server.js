@@ -203,41 +203,19 @@ async function backfillChannel(w, cfg, budget) {
   return { used, saved, seen }
 }
 
-// 채널별 조회수 중앙값 대비 배율을 계산해 저장한다.
+// 채널별 조회수 중앙값 대비 배율.
+//
+// 처음에는 JS 에서 계산해 upsert 했는데 한 건도 반영되지 않았다. PostgREST 의 upsert 는
+// INSERT ... ON CONFLICT DO UPDATE 로 나가서, 충돌로 UPDATE 될 행이라도 제안 행이
+// NOT NULL(title 등)을 만족해야 한다. video_id 와 multiple 만 보내면 거기서 걸린다.
+// 행마다 값이 다르니 PostgREST update 로도 한 번에 못 쓴다. DB 함수로 넘겼다.
 async function recomputeMultiples() {
-  const { data: channels } = await supabase
-    .from('yt_watches').select('value').eq('type', 'channel')
-  let updated = 0
-
-  for (const c of channels ?? []) {
-    const rows = []
-    for (let from = 0; ; from += 1000) {
-      const { data, error } = await supabase
-        .from('yt_videos')
-        .select('video_id, views')
-        .eq('channel_id', c.value)
-        .range(from, from + 999)
-      if (error) break
-      rows.push(...(data ?? []))
-      if (!data || data.length < 1000) break
-    }
-    if (rows.length < 5) continue // 표본이 너무 적으면 중앙값이 의미 없다
-
-    const sorted = rows.map((r) => Number(r.views ?? 0)).sort((a, b) => a - b)
-    const mid = Math.floor(sorted.length / 2)
-    const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
-    if (!median) continue
-
-    for (let i = 0; i < rows.length; i += 200) {
-      const chunk = rows.slice(i, i + 200).map((r) => ({
-        video_id: r.video_id,
-        multiple: Number((Number(r.views ?? 0) / median).toFixed(2))
-      }))
-      const { error } = await supabase.from('yt_videos').upsert(chunk, { onConflict: 'video_id' })
-      if (!error) updated += chunk.length
-    }
+  const { data, error } = await supabase.rpc('recompute_multiples')
+  if (error) {
+    console.warn(`[collect] 배율 계산 실패(함수 없음?): ${error.message}`)
+    return 0
   }
-  return updated
+  return data ?? 0
 }
 
 // ---------------------------------------------------------------- 수집
