@@ -50,6 +50,42 @@ function logFailure(scope, err) {
   }
 }
 
+// ---------------------------------------------------------------- 할당량 장부
+//
+// 오늘 쓴 유닛을 파일에 적어 둔다. DB 를 건드리지 않고, 재시작해도 남는다.
+// 할당량 리셋은 태평양 자정 기준이라 파일 이름도 그 날짜로 끊는다.
+const QUOTA_LIMIT = 10000
+
+function quotaDate() {
+  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
+}
+
+function unitsFile(date = quotaDate()) {
+  return path.join(LOG_DIR, `units-${date}.json`)
+}
+
+function readUnitsToday() {
+  try {
+    return Number(JSON.parse(fs.readFileSync(unitsFile(), 'utf8')).units) || 0
+  } catch {
+    return 0 // 오늘 첫 수집이면 파일이 없다
+  }
+}
+
+function addUnitsToday(n) {
+  if (!n) return
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    const date = quotaDate()
+    fs.writeFileSync(
+      unitsFile(date),
+      JSON.stringify({ date, units: readUnitsToday() + Number(n) })
+    )
+  } catch (e) {
+    console.warn(`[quota] 사용량 기록 실패: ${e.message}`)
+  }
+}
+
 // ---------------------------------------------------------------- YouTube API
 
 const YT_BASE = 'https://www.googleapis.com/youtube/v3'
@@ -740,6 +776,8 @@ async function collect() {
     collecting = false
   }
 
+  addUnitsToday(report.units)
+
   lastRun = {
     at: new Date().toISOString(),
     ms: Date.now() - started,
@@ -830,6 +868,7 @@ async function resolveChannelId(input) {
   const handle = raw.match(/@([A-Za-z0-9._-]+)/)
   if (handle) {
     const data = await ytGet('channels', { part: 'id', forHandle: `@${handle[1]}` })
+    addUnitsToday(1)
     if (data.items?.[0]?.id) return data.items[0].id
   }
 
@@ -837,6 +876,7 @@ async function resolveChannelId(input) {
   const name = raw.replace(/^https?:\/\/[^/]+\//, '').replace(/^(c|user)\//, '').split(/[/?]/)[0]
   if (name) {
     const data = await ytGet('search', { part: 'snippet', type: 'channel', q: name, maxResults: 1 })
+    addUnitsToday(100)
     if (data.items?.[0]?.id?.channelId) return data.items[0].id.channelId
   }
   return null
@@ -1391,7 +1431,9 @@ app.post('/api/related/search', requireAuth, async (req, res) => {
       saved = await saveVideos(details, `related:${term}`, cfg)
     }
 
-    res.json({ keyword: term, saved, units: 100 + Math.ceil(ids.length / 50), results: await relatedFromDb(term, video_id) })
+    const units = 100 + Math.ceil(ids.length / 50)
+    addUnitsToday(units)
+    res.json({ keyword: term, saved, units, results: await relatedFromDb(term, video_id) })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -1513,9 +1555,33 @@ app.delete('/api/watches/:id', requireAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
+// 상태바 — 마지막 수집·총 영상 수·오늘 쓴 할당량
+app.get('/api/status', requireAuth, async (req, res) => {
+  try {
+    const { count } = await supabase
+      .from('yt_videos').select('video_id', { count: 'exact', head: true })
+    const units = readUnitsToday()
+    res.json({
+      collecting,
+      last_run: lastRun && {
+        at: lastRun.at, ms: lastRun.ms, videos: lastRun.videos,
+        units: lastRun.units, errors: lastRun.errors?.length ?? 0, aborted: lastRun.aborted ?? null
+      },
+      total_videos: count ?? 0,
+      units_today: units,
+      quota_limit: QUOTA_LIMIT,
+      quota_date: quotaDate() // 태평양 자정 기준
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/channels/refresh', requireAuth, async (req, res) => {
   try {
-    res.json(await refreshChannels(true))
+    const r = await refreshChannels(true)
+    addUnitsToday(r.units)
+    res.json(r)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

@@ -59,19 +59,24 @@
   }
   .tab-on { color: var(--ink); border-bottom-color: var(--ink); }
 
+  /* 행 높이를 썸네일에 맞춰 고정한다. 지표가 몇 개든 줄이 흔들리지 않아야 훑기 좋다. */
   .row {
     display: flex; gap: 10px; align-items: center;
-    padding: 10px 0; border-bottom: 1px solid var(--line);
+    padding: 9px 6px; margin: 0 -6px; min-height: 72px;
+    border-bottom: 1px solid var(--line);
   }
   .row:last-child { border-bottom: none; }
+  .row:hover { background: rgba(255, 255, 255, .55); }
   .thumb { width: 96px; height: 54px; flex: none; border-radius: 6px; object-fit: cover; background: var(--line); }
   .meta { flex: 1; min-width: 0; }
+  /* 위계: 제목(진하게) > 채널(중간) > 나머지 메타(연하게) */
   .title {
-    display: block; font-size: 14px; font-weight: 600; color: var(--ink);
+    display: block; font-size: 14.5px; font-weight: 600; color: var(--ink); line-height: 1.4;
     text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   }
   .title:hover { text-decoration: underline; }
-  .sub { font-size: 12px; color: var(--ink-faint); display: flex; gap: 8px; flex-wrap: wrap; }
+  .sub { font-size: 12px; color: var(--ink-faint); display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; }
+  .sub .ch { color: var(--ink-soft); font-weight: 600; }
 
   .badge {
     font-size: 11px; font-weight: 600; padding: 2px 9px;
@@ -108,20 +113,22 @@
   }
   .idea { flex: none; white-space: nowrap; }
 
+  /* 지표 열은 폭을 고정해 행마다 뱃지가 같은 자리에서 시작하게 한다 */
   .metrics {
-    display: flex; gap: 5px; flex: none; flex-wrap: wrap;
-    justify-content: flex-end; max-width: 320px;
+    display: flex; gap: 5px; flex: 0 0 296px; flex-wrap: wrap;
+    justify-content: flex-end; max-width: 296px;
   }
+  /* 3단계 톤 — 기본(보통) / m-good(좋음) / m-warn(주의). 배율·침투·참여가 이 규칙을 쓴다. */
   .m {
     font-size: 10.5px; font-weight: 600; padding: 2px 7px;
     border-radius: 999px; white-space: nowrap;
     background: #f1efe8; color: #444441;
   }
+  .m-good, .m-fresh { background: #e1f5ee; color: #085041; }
+  .m-warn, .m-sat, .m-dead { background: #faeeda; color: #633806; }
+  /* 아래 둘은 많고 적음이 아니라 성격이 다른 신호라 톤을 따로 쓴다 */
   .m-hot { background: #fbeaf0; color: #72243e; }
-  .m-dead { background: #faeeda; color: #633806; }
   .m-debate { background: #e6f1fb; color: #0c447c; }
-  .m-fresh { background: #e1f5ee; color: #085041; }
-  .m-sat { background: #faeeda; color: #633806; }
 
   .star {
     background: none; border: none; padding: 0 3px; flex: none;
@@ -206,6 +213,45 @@
   }
   .hide { display: none; }
 
+  /* ---------------------------------------------------------------- 상태바 */
+  .statusbar {
+    display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap;
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 8px 12px; margin-bottom: 12px;
+    font-size: 12px; color: var(--ink-soft);
+  }
+  .statusbar:empty { display: none; }
+  .st { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+  .st b { color: var(--ink); font-weight: 600; }
+  .st-warn b { color: #8a5a06; }
+  .st-danger b { color: var(--danger); }
+  .st-live { color: var(--accent); font-weight: 700; }
+  .dot {
+    width: 7px; height: 7px; border-radius: 50%; background: var(--accent);
+    animation: pulse 1.2s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%, 100% { opacity: 1 } 50% { opacity: .2 } }
+  .bar {
+    flex: 1; min-width: 80px; max-width: 220px; height: 5px;
+    background: var(--line); border-radius: 999px; overflow: hidden;
+  }
+  .bar > span { display: block; height: 100%; background: var(--accent); }
+  .bar-warn > span { background: #c98a15; }
+  .bar-danger > span { background: var(--danger); }
+
+  /* ---------------------------------------------------------------- 로딩·빈 상태 */
+  .sk { display: flex; gap: 10px; align-items: center; padding: 9px 0; min-height: 72px; border-bottom: 1px solid var(--line); }
+  .sk-box {
+    background: linear-gradient(90deg, #eceae4 25%, #f7f6f2 37%, #eceae4 63%);
+    background-size: 400% 100%; border-radius: 6px;
+    animation: sheen 1.4s ease infinite;
+  }
+  @keyframes sheen { 0% { background-position: 100% 0 } 100% { background-position: 0 0 } }
+
+  .state { text-align: center; padding: 36px 16px; }
+  .state h4 { margin: 0 0 5px; font-size: 14.5px; color: var(--ink); }
+  .state p { margin: 0 0 12px; font-size: 13px; color: var(--ink-faint); }
+
   /* ---------------------------------------------------------------- 모바일
      한 줄에 썸네일·제목·지표·버튼을 모두 욱여넣으면 폰 폭에서 제목이 뭉개진다.
      지표 뱃지를 통째로 다음 줄로 내리고, 누르는 것들은 40px 이상으로 키운다. */
@@ -245,6 +291,10 @@
     .hits { max-width: 100%; }
     .notice { font-size: 12px; }
     .rel-kw { flex: 1 1 100%; padding: 9px 10px; }
+
+    .statusbar { gap: 5px 10px; padding: 7px 10px; font-size: 11.5px; }
+    .bar { flex: 1 0 100%; max-width: none; }
+    .sk, .row { min-height: 66px; }
   }
 </style>
 </head>
@@ -263,6 +313,8 @@
     <div class="brand"><span class="brand-mark">📡</span> 유튜브 레이더</div>
     <button class="btn-ghost btn-sm" id="run">지금 수집</button>
   </div>
+
+  <div class="statusbar" id="status"></div>
 
   <div class="tabs" id="tabs"></div>
 
@@ -371,6 +423,49 @@ async function showApp() {
   try { settings = await api('/api/settings') } catch { /* 게이트에서 처리 */ }
   renderTabs()
   render()
+  refreshStatus()
+}
+
+// ---------------------------------------------------------------- 로딩·빈 상태
+
+function skeleton(n = 6) {
+  return Array.from({ length: n }, () => `
+    <div class="sk">
+      <div class="sk-box" style="width:96px;height:54px;flex:none"></div>
+      <div style="flex:1">
+        <div class="sk-box" style="height:12px;width:62%;margin-bottom:8px"></div>
+        <div class="sk-box" style="height:10px;width:34%"></div>
+      </div>
+      <div class="sk-box" style="width:150px;height:16px;flex:none"></div>
+    </div>`).join('')
+}
+
+function stateBox(title, desc, action = '') {
+  return `<div class="state"><h4>${esc(title)}</h4><p>${esc(desc)}</p>${action}</div>`
+}
+
+// 기본값이 아닌 필터가 하나라도 걸려 있으면 0건일 때 초기화 버튼을 붙인다
+function filtersActive() {
+  return digGroup !== 'all' || digChannel !== 'all' || digSubs !== 'all'
+    || digFormat !== 'long' || digPeriod !== 'all'
+}
+
+function resetFilters() {
+  digGroup = 'all'; digChannel = 'all'; digSubs = 'all'
+  digFormat = 'long'; digPeriod = 'all'
+  render()
+}
+
+function emptyWithReset(title, desc) {
+  const action = filtersActive()
+    ? '<button class="btn-ghost btn-sm" id="reset-filters">필터 초기화</button>'
+    : ''
+  return stateBox(title, desc, action)
+}
+
+function wireReset(panel) {
+  const b = panel.querySelector('#reset-filters')
+  if (b) b.onclick = resetFilters
 }
 
 function videoRow(v, extra = '', opts = {}) {
@@ -383,8 +478,8 @@ function videoRow(v, extra = '', opts = {}) {
     <div class="meta">
       <a class="title" href="https://www.youtube.com/watch?v=${esc(v.video_id)}" target="_blank" rel="noopener noreferrer">${esc(v.title)}</a>
       <div class="sub">
-        <span>${esc(v.channel_title || '')}</span>
-        <span>조회 ${fmt(v.views ?? v.latest)}</span>
+        <span class="ch">${esc(v.channel_title || '')}</span>
+        <span title="${fmt(v.views ?? v.latest)}">조회 ${shortNum(v.views ?? v.latest)}</span>
         <span>${day(v.published_at)}</span>
         ${v.duration_sec != null ? `<span>${durLabel(v.duration_sec)}</span>` : ''}
       </div>
@@ -412,9 +507,12 @@ function saturationChip(v) {
   return ''
 }
 
+// 배수는 소수 1자리, 100 이상은 축약(x1.2천)해 뱃지 폭을 일정하게 둔다
+const ratio = (n) => (Number(n) >= 100 ? shortNum(n) : Number(n || 0).toFixed(1))
+
 function metricBadges(v) {
   return `<span class="metrics">
-    <span class="m">x${(v.multiple ?? 0).toFixed(1)}</span>
+    <span class="m">x${ratio(v.multiple)}</span>
     <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}</span>
     <span class="m">참여 ${(v.engage ?? 0).toFixed(1)}%</span>
     ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
@@ -571,7 +669,7 @@ const BADGE_CLASS = { short: 'b-short', mid: 'b-mid', long: 'b-long', pending: '
 
 async function render() {
   const panel = $('#panel')
-  panel.innerHTML = '<p class="muted">불러오는 중...</p>'
+  panel.innerHTML = skeleton()
   try {
     if (tab === 'dig') {
       const rows = await api(`/api/dig?period=${digPeriod}&sort=${digSort}&${filterQuery()}`)
@@ -591,11 +689,13 @@ async function render() {
           <button class="btn-ghost btn-sm" id="csv" ${rows.length ? '' : 'disabled'}>⬇️ CSV</button>
         </div>
         ${rows.length ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
-          : `<p class="empty">조건에 맞는 영상이 없어요. 백카탈로그가 더 쌓이면 나타납니다.
-               (배율은 채널당 영상 5개 이상 모여야 계산됩니다)</p>`}
+          : emptyWithReset(
+              '조건에 맞는 영상이 없어요',
+              '백카탈로그가 더 쌓이면 나타납니다. 배율은 채널·형식당 영상 5개 이상 모여야 계산됩니다.')}
       `
       wireFilters()
       wireRows(panel)
+      wireReset(panel)
       // 화면에 그려진 그대로(=현재 필터·정렬 결과) 내보낸다
       $('#csv').onclick = () => downloadCsv(`youtube-radar-dig-${todayStamp()}.csv`, toCsv(rows))
       return
@@ -607,7 +707,7 @@ async function render() {
         <p class="muted" style="margin-top:0">⭐ ${rows.length}건</p>
         ${rows.length
           ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
-          : '<p class="empty">아직 즐겨찾기한 영상이 없어요. 목록에서 ★ 을 눌러 담아 보세요.</p>'}
+          : stateBox('아직 즐겨찾기한 영상이 없어요', '목록에서 ★ 을 눌러 담아 보세요.')}
       `
       wireRows(panel)
       return
@@ -619,10 +719,11 @@ async function render() {
         <div class="filters">${filterBar()}<span class="muted">${rows.length}건</span></div>
         ${rows.length
           ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
-          : '<p class="empty">최근 30일 영상이 없어요.</p>'}
+          : emptyWithReset('최근 30일 영상이 없어요', '감시 채널이 새 영상을 올리면 여기에 쌓입니다.')}
       `
       wireFilters()
       wireRows(panel)
+      wireReset(panel)
       return
     }
 
@@ -906,7 +1007,52 @@ async function render() {
       }
     })
   } catch (e) {
-    if (e.message !== 'unauthorized') panel.innerHTML = `<p class="err">${esc(e.message)}</p>`
+    if (e.message !== 'unauthorized') {
+      panel.innerHTML = stateBox(
+        '불러오지 못했어요', e.message,
+        '<button class="btn btn-sm" id="retry">다시 시도</button>'
+      )
+      $('#retry').onclick = () => render()
+    }
+  }
+}
+
+// ---------------------------------------------------------------- 상태바
+//
+// 마지막 수집 시각 · 총 영상 수 · 오늘 쓴 할당량. 수집이 도는 동안엔 5초,
+// 평소엔 60초마다 갱신한다.
+let statusTimer = null
+
+async function refreshStatus() {
+  const el = $('#status')
+  if (!el) return
+  try {
+    const s = await api('/api/status')
+    const pct = Math.min(100, Math.round((s.units_today / s.quota_limit) * 100))
+    const level = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : ''
+    const at = s.last_run
+      ? new Date(s.last_run.at).toLocaleString('ko-KR',
+          { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+      : '없음'
+
+    el.innerHTML = `
+      <span class="st">${s.collecting
+        ? '<span class="dot"></span><span class="st-live">수집 중...</span>'
+        : `⏱ 마지막 수집 <b>${esc(at)}</b>`}</span>
+      <span class="st">🎞 영상 <b>${fmt(s.total_videos)}</b>개</span>
+      <span class="st ${level ? `st-${level}` : ''}">⚡ 오늘 <b>${fmt(s.units_today)}</b> / ${fmt(s.quota_limit)}유닛</span>
+      <span class="bar ${level ? `bar-${level}` : ''}" title="${pct}% 사용 (${esc(s.quota_date)} 태평양 기준)">
+        <span style="width:${pct}%"></span>
+      </span>
+      ${s.last_run?.aborted === 'quota'
+        ? '<span class="st st-danger"><b>할당량 초과로 중단 · 다음 주기 재시도</b></span>' : ''}
+      ${s.last_run?.errors
+        ? `<span class="st st-warn"><b>최근 수집 오류 ${s.last_run.errors}건</b></span>` : ''}
+    `
+    clearTimeout(statusTimer)
+    statusTimer = setTimeout(refreshStatus, s.collecting ? 5000 : 60000)
+  } catch {
+    el.innerHTML = '' // 인증 만료 등은 게이트가 처리한다
   }
 }
 
@@ -931,9 +1077,19 @@ function renderTabs() {
 $('#run').onclick = async () => {
   const btn = $('#run')
   btn.disabled = true; btn.textContent = '수집 중...'
-  try { await api('/api/collect', { method: 'POST' }); await render() }
-  catch (e) { alert(e.message) }
+  // 서버에 요청이 닿기 전에도 상태바가 바로 반응하게 직접 그린다
+  $('#status').innerHTML =
+    '<span class="st"><span class="dot"></span><span class="st-live">수집 중...</span></span>'
+  clearTimeout(statusTimer)
+  statusTimer = setTimeout(refreshStatus, 3000)
+  try {
+    await api('/api/collect', { method: 'POST' })
+    await render()
+  } catch (e) {
+    $('#status').innerHTML = `<span class="st st-danger"><b>${esc(e.message)}</b></span>`
+  }
   btn.disabled = false; btn.textContent = '지금 수집'
+  refreshStatus()
 }
 
 $('#enter').onclick = async () => {
