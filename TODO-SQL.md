@@ -7,9 +7,96 @@
 
 ---
 
+## 0. ⚠️ 에버그린·포화도 함수 — **미실행 확인됨**
+
+서버를 띄워 확인한 결과, 아래 두 함수가 **DB 에 없습니다.** 실제 로그:
+
+```
+[metric] 최근 속도 계산 실패(함수 없음?): Could not find the function public.video_velocity(ids, window_days) in the schema cache
+[metric] 주제 포화도 계산 실패(함수 없음?): Could not find the function public.topic_saturation(payload, window_days) in the schema cache
+```
+
+그래서 지금 발굴·신작 탭에서 **에버그린 증가량이 전부 `측정 중`** 이고
+**포화도 칩이 하나도 안 뜹니다.** (일평균 조회수는 함수 없이도 나옵니다.)
+`recompute_multiples` · `upsert_videos` 는 정상 동작 중입니다(배율 7,348건 갱신 확인).
+
+```sql
+-- (1) 최근 증가량 — 스냅샷을 PostgREST 로 긁으면 1000행 상한에 잘려 값이 틀린다
+create or replace function public.video_velocity(ids text[], window_days int default 7)
+returns table (
+  video_id text, snaps int,
+  latest_views bigint, latest_at timestamptz,
+  prev_views bigint, prev_at timestamptz
+)
+language sql
+stable
+as $$
+  with s as (
+    select sn.video_id, sn.views, sn.captured_at
+      from public.yt_snapshots sn
+     where sn.video_id = any(ids)
+  ),
+  latest as (
+    select distinct on (s.video_id) s.video_id, s.views, s.captured_at
+      from s
+     order by s.video_id, s.captured_at desc
+  ),
+  cnt as (
+    select s.video_id, count(*)::int as n
+      from s
+     group by s.video_id
+  ),
+  prev as (
+    select distinct on (s.video_id) s.video_id, s.views, s.captured_at
+      from s
+      join latest l on l.video_id = s.video_id
+     where s.captured_at < l.captured_at
+     order by s.video_id,
+              abs(extract(epoch from
+                (s.captured_at - (l.captured_at - make_interval(days => window_days)))))
+  )
+  select l.video_id, c.n, l.views, l.captured_at, p.views, p.captured_at
+    from latest l
+    join cnt c on c.video_id = l.video_id
+    left join prev p on p.video_id = l.video_id;
+$$;
+
+-- (2) 주제 포화도 — 영상마다 ilike 를 던지면 80건에 80왕복이라 묶어서 한 번에
+create extension if not exists pg_trgm;
+create index if not exists yt_videos_title_trgm
+  on public.yt_videos using gin (title gin_trgm_ops);
+
+create or replace function public.topic_saturation(payload jsonb, window_days int default 90)
+returns table (video_id text, channels int)
+language sql
+stable
+as $$
+  select x.video_id,
+         (select count(distinct v.channel_id)::int
+            from public.yt_videos v
+           where v.channel_id is not null
+             and v.channel_id is distinct from x.channel_id
+             and v.published_at >= now() - make_interval(days => window_days)
+             and v.score >= 0
+             and v.title ilike '%' ||
+                 replace(replace(replace(x.keyword, '\', '\\'), '%', '\%'), '_', '\_')
+                 || '%')
+    from jsonb_to_recordset(payload)
+      as x(video_id text, channel_id text, keyword text)
+   where length(coalesce(x.keyword, '')) >= 2;
+$$;
+```
+
+> 실행해도 **발굴 탭은 대부분 계속 `측정 중`** 일 수 있습니다. 백카탈로그로 들어온
+> 과거 영상은 스냅샷이 1개뿐이라 증가량을 낼 수 없어서입니다(README 1-j 하단 참고).
+> 신작·모아보기 탭은 두 번째 스냅샷이 쌓이는 대로 값이 찹니다.
+
+---
+
 ## 1. 구독자 수 일별 이력 (v1.2 · 주간 구독 증가)
 
-**상태: 미실행 — 실행해야 `⚙️ 감시 관리` 화면의 `주간 구독 +N` 이 나옵니다.**
+**상태: ✅ 실행 완료 확인** — 2026-08-17 강제 갱신으로 23개 채널 1일차 기록 완료.
+7일치가 차면 `주간 구독 +N` 이 뜹니다(현재는 `측정 중`).
 
 `yt_channels` 에는 구독자 **최신값만** 남고 갱신할 때마다 덮어써집니다.
 추이를 보려면 따로 쌓아야 합니다.
@@ -53,14 +140,12 @@ drop table if exists public.yt_channel_snapshots;
 
 ---
 
-## 참고 — 이미 실행되어 있어야 하는 것들
+## 참고 — 현재 DB 상태 (2026-08-17 서버 기동 시 실측)
 
-아래는 이번 작업에서 새로 만든 게 아니라 기존 기능이 쓰는 것들입니다.
-발굴 탭에 지표가 비어 보이면 README 1-j 절의 SQL 이 실행됐는지 확인하세요.
-
-| 함수 | 없으면 |
-|---|---|
-| `public.video_velocity(ids, window_days)` | 에버그린의 `최근7일 +N` 이 항상 `측정 중` |
-| `public.topic_saturation(payload, window_days)` | 주제 포화도 칩이 안 나옴 |
-| `public.recompute_multiples()` | 배율이 계산되지 않아 발굴 탭이 비어 보임 |
-| `public.upsert_videos(payload)` | 수집이 실패함 (필수) |
+| 함수·테이블 | 상태 | 없으면 |
+|---|---|---|
+| `public.upsert_videos(payload)` | ✅ 정상 | 수집 자체가 실패 (필수) |
+| `public.recompute_multiples()` | ✅ 정상 (배율 7,348건 갱신) | 배율이 없어 발굴 탭이 빈 화면 |
+| `public.yt_channel_snapshots` | ✅ 생성됨 (23채널 1일차 기록) | 주간 구독 증가만 안 보임 |
+| `public.video_velocity(...)` | ❌ **없음 → 0번 실행 필요** | 에버그린 `최근7일 +N` 이 항상 `측정 중` |
+| `public.topic_saturation(...)` | ❌ **없음 → 0번 실행 필요** | 주제 포화도 칩이 안 나옴 |
