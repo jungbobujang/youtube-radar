@@ -425,6 +425,52 @@ function metricBadges(v) {
   </span>`
 }
 
+// ---------------------------------------------------------------- CSV 내보내기
+
+const CSV_COLS = [
+  ['제목', (v) => v.title ?? ''],
+  ['채널', (v) => v.channel_title ?? ''],
+  ['조회수', (v) => Number(v.views ?? 0)],
+  ['배율', (v) => (v.multiple == null ? '' : Number(v.multiple).toFixed(2))],
+  ['침투', (v) => (v.reach == null ? '' : Number(v.reach).toFixed(2))],
+  ['참여', (v) => (v.engage == null ? '' : Number(v.engage).toFixed(2))],
+  ['게시일', (v) => (v.published_at ? v.published_at.slice(0, 10) : '')],
+  ['URL', (v) => `https://www.youtube.com/watch?v=${v.video_id}`]
+]
+
+// 제목에 쉼표·따옴표·줄바꿈이 흔하다. 전부 따옴표로 감싸고 내부 따옴표만 겹친다.
+// 앞에 =,+,-,@ 가 오면 엑셀이 수식으로 읽으므로 작은따옴표를 덧댄다.
+function csvCell(value) {
+  const s = String(value ?? '')
+  const safe = /^[=+\-@]/.test(s) ? `'${s}` : s
+  return `"${safe.replace(/"/g, '""')}"`
+}
+
+function toCsv(rows) {
+  const lines = [CSV_COLS.map(([h]) => csvCell(h)).join(',')]
+  for (const v of rows) lines.push(CSV_COLS.map(([, get]) => csvCell(get(v))).join(','))
+  return lines.join('\r\n')
+}
+
+function downloadCsv(filename, text) {
+  // BOM 이 없으면 엑셀이 한글을 깨서 읽는다
+  const blob = new Blob([`﻿${text}`], { type: 'text/csv;charset=utf-8' })
+  const url = URL.createObjectURL(blob)
+  const a = document.createElement('a')
+  a.href = url
+  a.download = filename
+  document.body.appendChild(a)
+  a.click()
+  a.remove()
+  setTimeout(() => URL.revokeObjectURL(url), 1000)
+}
+
+function todayStamp() {
+  const d = new Date()
+  const p = (n) => String(n).padStart(2, '0')
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`
+}
+
 function ideaButton(v) {
   return `<button class="btn-ghost btn-sm idea" data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}">아이디어로</button>`
 }
@@ -542,6 +588,7 @@ async function render() {
                 .map(([v, t]) => `<option value="${v}" ${digPeriod === v ? 'selected' : ''}>${t}</option>`).join('')}
             </select>`)}
           <span class="muted">${rows.length}건</span>
+          <button class="btn-ghost btn-sm" id="csv" ${rows.length ? '' : 'disabled'}>⬇️ CSV</button>
         </div>
         ${rows.length ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
           : `<p class="empty">조건에 맞는 영상이 없어요. 백카탈로그가 더 쌓이면 나타납니다.
@@ -549,6 +596,8 @@ async function render() {
       `
       wireFilters()
       wireRows(panel)
+      // 화면에 그려진 그대로(=현재 필터·정렬 결과) 내보낸다
+      $('#csv').onclick = () => downloadCsv(`youtube-radar-dig-${todayStamp()}.csv`, toCsv(rows))
       return
     }
 
