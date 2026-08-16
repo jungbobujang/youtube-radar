@@ -118,6 +118,10 @@ async function saveVideos(items, source, cfg) {
     channel_title: v.snippet?.channelTitle ?? null,
     published_at: v.snippet?.publishedAt ?? null,
     category_id: v.snippet?.categoryId ?? null,
+    // 최신값을 영상 행에도 둔다. 발굴 정렬·중앙값 계산이 스냅샷 전수 조회 없이 끝난다.
+    views: Number(v.statistics?.viewCount ?? 0),
+    like_count: Number(v.statistics?.likeCount ?? 0),
+    comment_count: Number(v.statistics?.commentCount ?? 0),
     score: scoreVideo(v, cfg, source),
     source
   }))
@@ -140,9 +144,112 @@ async function saveVideos(items, source, cfg) {
   return items.length
 }
 
+// ---------------------------------------------------------------- 백카탈로그
+
+const BACKFILL_MAX_PER_CHANNEL = 500 // 채널당 최대 보관 영상 수
+const BACKFILL_UNIT_BUDGET = 260     // 1회 수집에서 백카탈로그에 쓸 유닛 상한
+const PAGE = 50                      // playlistItems 한 페이지
+
+// 이미 저장된 영상 수가 적은 채널부터 돈다. 별도 커서 컬럼 없이 순환이 된다.
+async function channelBacklogState(channels) {
+  const out = []
+  for (const w of channels) {
+    const { count } = await supabase
+      .from('yt_videos')
+      .select('video_id', { count: 'exact', head: true })
+      .eq('channel_id', w.value)
+    out.push({ watch: w, stored: count ?? 0 })
+  }
+  return out.sort((a, b) => a.stored - b.stored)
+}
+
+// 한 채널의 업로드 재생목록을 페이지네이션하며 아직 없는 영상만 채운다.
+async function backfillChannel(w, cfg, budget) {
+  let used = 0
+  let pageToken
+  let seen = 0
+  let saved = 0
+
+  while (seen < BACKFILL_MAX_PER_CHANNEL && used + 2 <= budget) {
+    const playlistId = await uploadsPlaylistId(w)
+    const list = await ytGet('playlistItems', {
+      part: 'contentDetails',
+      playlistId,
+      maxResults: PAGE,
+      ...(pageToken ? { pageToken } : {})
+    })
+    used += 1
+
+    const ids = (list.items ?? []).map((i) => i.contentDetails?.videoId).filter(Boolean)
+    seen += ids.length
+    if (ids.length === 0) break
+
+    // 이미 있는 영상은 상세를 다시 부르지 않는다 (스냅샷은 신작 수집에서 계속 쌓인다)
+    const { data: known } = await supabase
+      .from('yt_videos').select('video_id').in('video_id', ids)
+    const haveSet = new Set((known ?? []).map((r) => r.video_id))
+    const fresh = ids.filter((id) => !haveSet.has(id))
+
+    if (fresh.length > 0) {
+      const details = await fetchVideoDetails(fresh)
+      used += Math.ceil(fresh.length / 50)
+      saved += await saveVideos(details, `backfill:${w.value}`, cfg)
+    }
+
+    pageToken = list.nextPageToken
+    if (!pageToken) break
+  }
+
+  return { used, saved, seen }
+}
+
+// 채널별 조회수 중앙값 대비 배율을 계산해 저장한다.
+async function recomputeMultiples() {
+  const { data: channels } = await supabase
+    .from('yt_watches').select('value').eq('type', 'channel')
+  let updated = 0
+
+  for (const c of channels ?? []) {
+    const rows = []
+    for (let from = 0; ; from += 1000) {
+      const { data, error } = await supabase
+        .from('yt_videos')
+        .select('video_id, views')
+        .eq('channel_id', c.value)
+        .range(from, from + 999)
+      if (error) break
+      rows.push(...(data ?? []))
+      if (!data || data.length < 1000) break
+    }
+    if (rows.length < 5) continue // 표본이 너무 적으면 중앙값이 의미 없다
+
+    const sorted = rows.map((r) => Number(r.views ?? 0)).sort((a, b) => a - b)
+    const mid = Math.floor(sorted.length / 2)
+    const median = sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+    if (!median) continue
+
+    for (let i = 0; i < rows.length; i += 200) {
+      const chunk = rows.slice(i, i + 200).map((r) => ({
+        video_id: r.video_id,
+        multiple: Number((Number(r.views ?? 0) / median).toFixed(2))
+      }))
+      const { error } = await supabase.from('yt_videos').upsert(chunk, { onConflict: 'video_id' })
+      if (!error) updated += chunk.length
+    }
+  }
+  return updated
+}
+
 // ---------------------------------------------------------------- 수집
 
 let lastRun = null
+
+async function readSettings() {
+  const { data } = await supabase
+    .from('yt_watches').select('value').eq('type', 'setting').eq('active', true)
+  const flags = new Set((data ?? []).map((r) => r.value))
+  return { trendingOn: flags.has('trending_on') } // 기본 off
+}
 
 async function collect() {
   const started = Date.now()
@@ -167,19 +274,23 @@ async function collect() {
     categoryIds: watches.filter((w) => w.type === 'category').map((w) => String(w.value))
   }
 
-  // a. 인기 급상승 — videos.list 는 통계까지 함께 온다 (1 유닛)
-  try {
-    const data = await ytGet('videos', {
-      part: 'snippet,statistics',
-      chart: 'mostPopular',
-      regionCode: 'KR',
-      maxResults: 50
-    })
-    report.units += 1
-    report.trending = await saveVideos(data.items ?? [], 'trending', cfg)
-  } catch (err) {
-    console.error('[collect] 인기 급상승 실패:', err.message)
-    report.errors.push(`인기 급상승: ${err.message}`)
+  const settings = await readSettings()
+
+  // a. 인기 급상승 — 기본은 꺼져 있다 (백카탈로그 발굴로 전략 전환)
+  if (settings.trendingOn) {
+    try {
+      const data = await ytGet('videos', {
+        part: 'snippet,statistics',
+        chart: 'mostPopular',
+        regionCode: 'KR',
+        maxResults: 50
+      })
+      report.units += 1
+      report.trending = await saveVideos(data.items ?? [], 'trending', cfg)
+    } catch (err) {
+      console.error('[collect] 인기 급상승 실패:', err.message)
+      report.errors.push(`인기 급상승: ${err.message}`)
+    }
   }
 
   const since = new Date(Date.now() - 14 * 864e5).toISOString()
@@ -227,6 +338,38 @@ async function collect() {
       console.error(`[collect] 감시 "${w.label || w.value}" 실패:`, err.message)
       report.errors.push(`${w.label || w.value}: ${err.message}`)
     }
+  }
+
+  // c. 백카탈로그 — 저장량이 적은 채널부터 유닛 예산 안에서 과거를 파고든다
+  const channels = watches.filter((w) => w.type === 'channel')
+  if (channels.length > 0) {
+    let budget = BACKFILL_UNIT_BUDGET
+    report.backfill = {}
+    try {
+      for (const { watch, stored } of await channelBacklogState(channels)) {
+        if (budget < 3) break
+        if (stored >= BACKFILL_MAX_PER_CHANNEL) continue
+        try {
+          const r = await backfillChannel(watch, cfg, budget)
+          budget -= r.used
+          report.units += r.used
+          if (r.saved > 0) report.backfill[watch.label || watch.value] = r.saved
+        } catch (err) {
+          console.error(`[collect] 백카탈로그 "${watch.label}" 실패:`, err.message)
+          report.errors.push(`백카탈로그 ${watch.label}: ${err.message}`)
+        }
+      }
+    } catch (err) {
+      report.errors.push(`백카탈로그: ${err.message}`)
+    }
+  }
+
+  // d. 채널별 중앙값 대비 배율 갱신
+  try {
+    report.multiples = await recomputeMultiples()
+  } catch (err) {
+    console.error('[collect] 배율 계산 실패:', err.message)
+    report.errors.push(`배율: ${err.message}`)
   }
 
   lastRun = {
@@ -403,6 +546,96 @@ app.get('/api/discover', requireAuth, async (req, res) => {
   }
 })
 
+// 💎 발굴 — 채널 중앙값 대비 배율이 높은 과거 영상
+app.get('/api/dig', requireAuth, async (req, res) => {
+  try {
+    const { period = 'all', channel = 'all', min = '3' } = req.query
+    const now = Date.now()
+
+    // 게시 6개월~3년이 기본 범위
+    const RANGES = {
+      '6m-1y': [182, 365],
+      '1y-2y': [365, 730],
+      '2y+': [730, 1095],
+      all: [182, 1095]
+    }
+    const [minDays, maxDays] = RANGES[period] ?? RANGES.all
+    const newest = new Date(now - minDays * 864e5).toISOString()
+    const oldest = new Date(now - maxDays * 864e5).toISOString()
+
+    let q = supabase
+      .from('yt_videos')
+      .select('*')
+      .gte('multiple', Number(min) || 3)
+      .gte('published_at', oldest)
+      .lte('published_at', newest)
+      .gte('score', 0)
+      .order('multiple', { ascending: false })
+      .limit(80)
+    if (channel !== 'all') q = q.eq('channel_id', channel)
+
+    const { data, error } = await q
+    if (error) throw error
+    res.json(data ?? [])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 📡 신작 — 감시 채널의 최근 30일 영상
+app.get('/api/fresh', requireAuth, async (req, res) => {
+  try {
+    const { data: chans } = await supabase
+      .from('yt_watches').select('value').eq('type', 'channel')
+    const ids = (chans ?? []).map((c) => c.value)
+    if (ids.length === 0) return res.json([])
+
+    const since = new Date(Date.now() - 30 * 864e5).toISOString()
+    const { data, error } = await supabase
+      .from('yt_videos')
+      .select('*')
+      .in('channel_id', ids)
+      .gte('published_at', since)
+      .gte('score', 0)
+      .order('published_at', { ascending: false })
+      .limit(80)
+    if (error) throw error
+    res.json(data ?? [])
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.get('/api/settings', requireAuth, async (req, res) => {
+  try {
+    const s = await readSettings()
+    const { data: chans } = await supabase
+      .from('yt_watches').select('value, label').eq('type', 'channel').order('label')
+    res.json({ ...s, channels: chans ?? [] })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+app.post('/api/settings/trending', requireAuth, async (req, res) => {
+  try {
+    const { on } = req.body ?? {}
+    if (on) {
+      const { error } = await supabase
+        .from('yt_watches')
+        .insert({ type: 'setting', value: 'trending_on', label: '급상승 수집', active: true })
+      if (error) throw error
+    } else {
+      const { error } = await supabase
+        .from('yt_watches').delete().eq('type', 'setting').eq('value', 'trending_on')
+      if (error) throw error
+    }
+    res.json(await readSettings())
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.get('/api/radar', requireAuth, async (req, res) => {
   try {
     const { data: videos, error } = await supabase
@@ -456,7 +689,7 @@ app.get('/api/watches', requireAuth, async (req, res) => {
 app.post('/api/watches', requireAuth, async (req, res) => {
   try {
     const { type, value, label } = req.body ?? {}
-    const TYPES = ['keyword', 'channel', 'include_kw', 'exclude_kw', 'category']
+    const TYPES = ['keyword', 'channel', 'include_kw', 'exclude_kw', 'category', 'setting']
     if (!TYPES.includes(type) || !value?.trim()) {
       return res.status(400).json({ error: '입력을 확인해 주세요' })
     }

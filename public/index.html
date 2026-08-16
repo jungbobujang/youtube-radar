@@ -93,6 +93,14 @@
   .err { color: var(--danger); font-size: 13px; }
 
   .b-score { background: #e6f1fb; color: #0c447c; }
+  .b-mult { background: #eeedfe; color: #3c3489; }
+
+  .filters { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-bottom: 10px; }
+  .filters select {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 7px 10px; font-size: 13.5px; background: var(--surface);
+  }
+  .idea { flex: none; white-space: nowrap; }
   .hits { font-size: 11px; color: var(--accent); flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .sec { font-size: 13px; font-weight: 700; margin: 22px 0 8px; }
@@ -137,19 +145,17 @@
     <button class="btn-ghost btn-sm" id="run">지금 수집</button>
   </div>
 
-  <div class="tabs">
-    <button class="tab tab-on" data-tab="radar">🎯 내 레이더</button>
-    <button class="tab" data-tab="discover">🔥 급상승 전체</button>
-    <button class="tab" data-tab="tracking">📈 추적 중</button>
-    <button class="tab" data-tab="watches">⚙️ 감시 관리</button>
-  </div>
+  <div class="tabs" id="tabs"></div>
 
   <div id="panel"></div>
 </div>
 
 <script>
 const $ = (s) => document.querySelector(s)
-let tab = 'radar'
+let tab = 'dig'
+let settings = { trendingOn: false, channels: [] }
+let digPeriod = 'all'
+let digChannel = 'all'
 
 // 유튜브 영상 카테고리 (KR 주요 항목)
 const YT_CATEGORIES = [
@@ -180,7 +186,13 @@ async function api(path, opts) {
 }
 
 function showGate() { $('#gate').classList.remove('hide'); $('#app').classList.add('hide') }
-function showApp() { $('#gate').classList.add('hide'); $('#app').classList.remove('hide'); render() }
+async function showApp() {
+  $('#gate').classList.add('hide')
+  $('#app').classList.remove('hide')
+  try { settings = await api('/api/settings') } catch { /* 게이트에서 처리 */ }
+  renderTabs()
+  render()
+}
 
 function videoRow(v, extra = '') {
   return `<div class="row">
@@ -203,6 +215,55 @@ async function render() {
   const panel = $('#panel')
   panel.innerHTML = '<p class="muted">불러오는 중...</p>'
   try {
+    if (tab === 'dig') {
+      const rows = await api(`/api/dig?period=${digPeriod}&channel=${encodeURIComponent(digChannel)}`)
+      panel.innerHTML = `
+        <div class="filters">
+          <select id="f-period">
+            ${[['all', '전체 (6개월~3년)'], ['6m-1y', '6개월~1년'], ['1y-2y', '1~2년'], ['2y+', '2년 이상']]
+              .map(([v, t]) => `<option value="${v}" ${digPeriod === v ? 'selected' : ''}>${t}</option>`).join('')}
+          </select>
+          <select id="f-channel">
+            <option value="all">모든 채널</option>
+            ${settings.channels.map((c) => `<option value="${esc(c.value)}" ${digChannel === c.value ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+          </select>
+          <span class="muted">${rows.length}건</span>
+        </div>
+        ${rows.length ? rows.map((v) => videoRow(v, `
+            <span class="badge b-mult">x${(v.multiple ?? 0).toFixed(1)}</span>
+            <button class="btn-ghost btn-sm idea" data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}">아이디어로</button>
+          `)).join('')
+          : `<p class="empty">조건에 맞는 영상이 없어요. 백카탈로그가 더 쌓이면 나타납니다.
+               (배율은 채널당 영상 5개 이상 모여야 계산됩니다)</p>`}
+      `
+      $('#f-period').onchange = (e) => { digPeriod = e.target.value; render() }
+      $('#f-channel').onchange = (e) => { digChannel = e.target.value; render() }
+      panel.querySelectorAll('.idea').forEach((b) => {
+        b.onclick = async () => {
+          const text = `${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}`
+          try {
+            await navigator.clipboard.writeText(text)
+            b.textContent = '복사됨'
+          } catch {
+            const ta = document.createElement('textarea')
+            ta.value = text; document.body.appendChild(ta); ta.select()
+            document.execCommand('copy'); ta.remove()
+            b.textContent = '복사됨'
+          }
+          setTimeout(() => { b.textContent = '아이디어로' }, 1400)
+        }
+      })
+      return
+    }
+
+    if (tab === 'fresh') {
+      const rows = await api('/api/fresh')
+      panel.innerHTML = rows.length
+        ? rows.map((v) => videoRow(v, v.multiple ? `<span class="badge b-mult">x${v.multiple.toFixed(1)}</span>` : '')).join('')
+        : '<p class="empty">최근 30일 영상이 없어요.</p>'
+      return
+    }
+
     if (tab === 'radar') {
       const rows = await api('/api/radar')
       panel.innerHTML = rows.length
@@ -256,6 +317,13 @@ async function render() {
         현재 <b>${costing}개</b> → 하루 약 ${fmt(costing * 100 * 8)} 유닛.
         <br>관심/제외 키워드와 카테고리 필터는 <b>추가 호출 없이</b> 채점에만 쓰이므로 할당량과 무관합니다.
       </div>
+
+      <h3 class="sec">🔥 급상승 수집</h3>
+      <label class="cat">
+        <input type="checkbox" id="s-trending" ${settings.trendingOn ? 'checked' : ''}>
+        인기 급상승(mostPopular)도 함께 수집 — 기본은 꺼짐
+      </label>
+      <p class="muted">채널 백카탈로그 발굴이 주 전략이라 기본값은 off 입니다.</p>
 
       <h3 class="sec">🔍 수집 대상 <span class="muted">(할당량 소모)</span></h3>
       <div class="form">
@@ -315,6 +383,12 @@ async function render() {
       } catch (e) { $('#w-err').textContent = e.message }
     }
 
+    $('#s-trending').onchange = async (e) => {
+      settings = { ...settings, ...await api('/api/settings/trending', {
+        method: 'POST', body: JSON.stringify({ on: e.target.checked })
+      }) }
+      renderTabs()
+    }
     $('#w-add').onclick = () => add($('#w-type').value, $('#w-value').value.trim())
     $('#inc-add').onclick = () => add('include_kw', $('#inc-value').value.trim())
     $('#exc-add').onclick = () => add('exclude_kw', $('#exc-value').value.trim())
@@ -346,13 +420,21 @@ async function render() {
   }
 }
 
-document.querySelectorAll('.tab').forEach((b) => {
-  b.onclick = () => {
-    tab = b.dataset.tab
-    document.querySelectorAll('.tab').forEach((x) => x.classList.toggle('tab-on', x === b))
-    render()
-  }
-})
+function renderTabs() {
+  const defs = [
+    ['dig', '💎 발굴'],
+    ['fresh', '📡 신작'],
+    ...(settings.trendingOn ? [['discover', '🔥 급상승']] : []),
+    ['tracking', '📈 추적 중'],
+    ['watches', '⚙️ 감시 관리']
+  ]
+  $('#tabs').innerHTML = defs
+    .map(([k, t]) => `<button class="tab ${tab === k ? 'tab-on' : ''}" data-tab="${k}">${t}</button>`)
+    .join('')
+  document.querySelectorAll('.tab').forEach((b) => {
+    b.onclick = () => { tab = b.dataset.tab; renderTabs(); render() }
+  })
+}
 
 $('#run').onclick = async () => {
   const btn = $('#run')

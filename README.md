@@ -87,6 +87,35 @@ insert into public.yt_watches (type, value, label, active) values
   ('exclude_kw', '직캠',     '직캠',     true);
 ```
 
+### 1-c. 백카탈로그 발굴 모드 (v0.3 추가분)
+
+```sql
+-- 영상 최신 통계 (스냅샷 전수 조회 없이 정렬·중앙값 계산을 하기 위함)
+alter table public.yt_videos add column if not exists views bigint default 0;
+alter table public.yt_videos add column if not exists like_count bigint default 0;
+alter table public.yt_videos add column if not exists comment_count bigint default 0;
+
+-- 채널 중앙값 대비 배율
+alter table public.yt_videos add column if not exists multiple numeric;
+
+-- 발굴 정렬·필터용 인덱스
+create index if not exists yt_videos_multiple_idx on public.yt_videos (multiple desc);
+create index if not exists yt_videos_channel_idx on public.yt_videos (channel_id);
+create index if not exists yt_videos_published_idx on public.yt_videos (published_at desc);
+```
+
+급상승 수집 on/off 는 `yt_watches` 에 `type='setting', value='trending_on'` 행이 있으면 켜짐,
+없으면 꺼짐입니다. 별도 테이블 없이 감시 관리 화면의 체크박스로 조작합니다.
+
+**수집 흐름**
+
+1. 급상승 (설정이 켜져 있을 때만, 1유닛)
+2. 신작 — 채널마다 업로드 재생목록 최근 25개 (채널당 2유닛)
+3. 백카탈로그 — 저장량이 적은 채널부터 유닛 예산(`BACKFILL_UNIT_BUDGET`) 안에서
+   과거를 파고든다. 채널당 최대 `BACKFILL_MAX_PER_CHANNEL`(500)개.
+   이미 저장된 영상은 상세를 다시 부르지 않고, 스냅샷은 신작 수집에서 계속 쌓인다
+4. 채널별 조회수 중앙값을 구해 각 영상의 `multiple`(배율) 갱신 (표본 5개 미만이면 건너뜀)
+
 ### 채점 규칙
 
 | 항목 | 점수 |
