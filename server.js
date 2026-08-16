@@ -204,7 +204,10 @@ const METRIC = {
   DEBATE_RATIO: 0.15,     // 댓글/좋아요가 이 위면 🗣️ 토론형
   VELOCITY_WINDOW_D: 7,   // 에버그린 최근 증가량 창(일)
   SATURATION_WINDOW_D: 90,// 주제 포화도를 볼 최근 N일
-  SATURATION_WARN: 2      // 다른 채널 이만큼부터 ⚠️ 재탕 경고
+  SATURATION_WARN: 2,     // 다른 채널 이만큼부터 ⚠️ 재탕 경고
+  WEEKLY_TOP: 10,         // 주간 리포트 신작 상위 개수
+  WEEKLY_DIG_MIN: 5,      // 주간 리포트에 올릴 최소 배율
+  WEEKLY_DIG_MAX: 20      // 주간 리포트 발굴분 최대 개수
 }
 
 function deriveMetrics(v, channel) {
@@ -1142,6 +1145,83 @@ app.get('/api/starred', requireAuth, async (req, res) => {
 
     attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
     res.json(await attachSaturation(rows))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// ---------------------------------------------------------------- 주간 리포트
+//
+// 지난 7일을 한 장으로 요약한다. 이미 쌓인 DB 만 읽으므로 할당량을 쓰지 않는다.
+// cron 에는 걸지 않는다 — 탭을 열 때만 계산한다.
+async function weeklyReport() {
+  const since = new Date(Date.now() - 7 * DAY).toISOString()
+
+  const chans = await channelMap()
+  const overrides = await formatOverrides()
+  const decorate = (v) => ({
+    ...v,
+    format: effectiveFormat(v, overrides),
+    ...deriveMetrics(v, chans.get(v.channel_id))
+  })
+
+  // a. 지난 7일 신작 중 성과 상위 — 배율 우선, 같으면 조회수
+  const { data: watched } = await supabase
+    .from('yt_watches').select('value').eq('type', 'channel')
+  const channelIds = (watched ?? []).map((w) => w.value)
+
+  let topFresh = []
+  if (channelIds.length > 0) {
+    const { data, error } = await supabase
+      .from('yt_videos')
+      .select('*')
+      .in('channel_id', channelIds)
+      .gte('published_at', since)
+      .gte('score', 0)
+      .order('views', { ascending: false })
+      .limit(500)
+    if (error) throw error
+    topFresh = (data ?? [])
+      .map(decorate)
+      .sort((a, b) =>
+        (b.multiple ?? 0) - (a.multiple ?? 0) || (b.views ?? 0) - (a.views ?? 0))
+      .slice(0, METRIC.WEEKLY_TOP)
+  }
+
+  // b. 이번 주에 처음 눈에 띈 배율 5배 이상 — 백카탈로그에서 새로 올라온 것들.
+  //    게시일이 아니라 first_seen_at 을 본다 (발굴은 과거 영상이 대상이라)
+  const { data: digs, error: dErr } = await supabase
+    .from('yt_videos')
+    .select('*')
+    .gte('first_seen_at', since)
+    .gte('multiple', METRIC.WEEKLY_DIG_MIN)
+    .gte('score', 0)
+    .order('multiple', { ascending: false })
+    .limit(200)
+  if (dErr) throw dErr
+  const newDigs = (digs ?? []).map(decorate).slice(0, METRIC.WEEKLY_DIG_MAX)
+
+  // c. 즐겨찾기 — 전체와 이번 주 추가분
+  const { count: starTotal } = await supabase
+    .from('yt_videos').select('video_id', { count: 'exact', head: true }).eq('starred', true)
+  const { count: starWeek } = await supabase
+    .from('yt_videos').select('video_id', { count: 'exact', head: true })
+    .eq('starred', true).gte('starred_at', since)
+
+  return {
+    generated_at: new Date().toISOString(),
+    since,
+    window_days: 7,
+    top_fresh: topFresh,
+    new_digs: newDigs,
+    starred: { total: starTotal ?? 0, this_week: starWeek ?? 0 }
+  }
+}
+
+// 📊 주간 — 수동 조회 전용 (cron 미등록)
+app.get('/api/weekly', requireAuth, async (req, res) => {
+  try {
+    res.json(await weeklyReport())
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

@@ -626,6 +626,29 @@ async function render() {
       return
     }
 
+    if (tab === 'weekly') {
+      const w = await api('/api/weekly')
+      const list = (rows, empty) => rows.length
+        ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
+        : `<p class="empty">${empty}</p>`
+      panel.innerHTML = `
+        <p class="muted" style="margin-top:0">
+          ${day(w.since)} ~ 오늘 (7일) · ⭐ 전체 ${fmt(w.starred.total)}건
+          <b>이번 주 +${fmt(w.starred.this_week)}</b>
+        </p>
+        <h3 class="sec">🚀 신작 성과 상위 <span class="muted">${w.top_fresh.length}건 · 배율순</span></h3>
+        ${list(w.top_fresh, '지난 7일에 올라온 신작이 없어요.')}
+        <h3 class="sec">💎 새로 발굴된 배율 5배+ <span class="muted">${w.new_digs.length}건</span></h3>
+        ${list(w.new_digs, '이번 주에 새로 걸린 5배 이상 영상이 없어요.')}
+        <p class="muted" style="margin-top:14px">
+          이 탭은 열 때만 계산합니다 (자동 실행 없음 · 할당량 0).
+          원본 JSON 은 <code>/api/weekly</code> 에서 그대로 받을 수 있어요.
+        </p>
+      `
+      wireRows(panel)
+      return
+    }
+
     if (tab === 'radar') {
       const rows = await api('/api/radar')
       panel.innerHTML = rows.length
@@ -892,6 +915,7 @@ function renderTabs() {
     ['dig', '💎 발굴'],
     ['starred', '⭐ 모아보기'],
     ['fresh', '📡 신작'],
+    ['weekly', '📊 주간'],
     ...(settings.trendingOn ? [['discover', '🔥 급상승']] : []),
     ['tracking', '📈 추적 중'],
     ['watches', '⚙️ 감시 관리']
