@@ -366,3 +366,95 @@ $$;
 ```
 
 `starred`, `starred_at`, `multiple`, `first_seen_at` 은 갱신 대상에서 빠져 보존됩니다.
+
+### 1-h. 쇼츠/롱폼 구분 (v0.8)
+
+```sql
+alter table public.yt_videos add column if not exists duration_sec int;
+create index if not exists yt_videos_duration_idx on public.yt_videos (duration_sec);
+```
+
+`upsert_videos` 를 duration_sec 까지 저장하도록 갱신합니다.
+
+```sql
+create or replace function public.upsert_videos(payload jsonb)
+returns integer
+language plpgsql
+as $$
+declare n integer;
+begin
+  insert into public.yt_videos as v (
+    video_id, title, channel_id, channel_title, published_at,
+    category_id, views, like_count, comment_count, duration_sec, score, source
+  )
+  select
+    x.video_id, x.title, x.channel_id, x.channel_title, x.published_at,
+    x.category_id, x.views, x.like_count, x.comment_count, x.duration_sec, x.score, x.source
+  from jsonb_to_recordset(payload) as x(
+    video_id text, title text, channel_id text, channel_title text,
+    published_at timestamptz, category_id text, views bigint,
+    like_count bigint, comment_count bigint, duration_sec int, score int, source text
+  )
+  on conflict (video_id) do update set
+    title         = excluded.title,
+    channel_title = excluded.channel_title,
+    published_at  = excluded.published_at,
+    category_id   = excluded.category_id,
+    views         = excluded.views,
+    like_count    = excluded.like_count,
+    comment_count = excluded.comment_count,
+    duration_sec  = coalesce(excluded.duration_sec, v.duration_sec),
+    score         = excluded.score,
+    source        = excluded.source;
+  get diagnostics n = row_count;
+  return n;
+end;
+$$;
+```
+
+배율 중앙값을 형식별로 나눠 계산합니다. 쇼츠 조회수가 롱폼 중앙값을 왜곡하지 않게 하기 위함입니다.
+
+```sql
+create or replace function public.recompute_multiples()
+returns integer
+language plpgsql
+as $$
+declare affected integer := 0;
+begin
+  with fmt as (
+    select video_id, channel_id, views,
+           case when duration_sec is null      then 'unknown'
+                when duration_sec <= 60        then 'shorts'
+                when duration_sec <= 180       then 'mid'
+                else 'long' end as f
+      from public.yt_videos
+     where channel_id is not null and views is not null
+  ),
+  med as (
+    select channel_id, f, percentile_cont(0.5) within group (order by views) as m
+      from fmt
+     group by channel_id, f
+    having count(*) >= 5
+  )
+  update public.yt_videos v
+     set multiple = round((v.views::numeric / med.m)::numeric, 2)
+    from fmt, med
+   where v.video_id   = fmt.video_id
+     and med.channel_id = fmt.channel_id
+     and med.f        = fmt.f
+     and med.m > 0;
+  get diagnostics affected = row_count;
+  return affected;
+end;
+$$;
+```
+
+| 형식 | 기준 |
+|---|---|
+| shorts | 60초 이하 |
+| mid | 61~180초 |
+| long | 181초 이상 |
+
+발굴·신작 탭의 기본값은 **롱폼**입니다. 재생시간이 아직 없는(`null`) 영상은
+`형식 전체` 에서만 보입니다. 매 수집마다 예산(`DURATION_UNIT_BUDGET`) 안에서
+50개씩 채워 넣습니다.

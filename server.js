@@ -43,17 +43,45 @@ async function ytGet(endpoint, params) {
 }
 
 // videos.list 는 한 번에 50개까지. id 를 나눠 던진다.
+// contentDetails 를 붙여도 유닛은 그대로 1이다.
 async function fetchVideoDetails(ids) {
   const out = []
   for (let i = 0; i < ids.length; i += 50) {
     const chunk = ids.slice(i, i + 50)
     const data = await ytGet('videos', {
-      part: 'snippet,statistics',
+      part: 'snippet,statistics,contentDetails',
       id: chunk.join(',')
     })
     out.push(...(data.items ?? []))
   }
   return out
+}
+
+// ISO 8601 (PT1H2M3S) -> 초
+function parseDuration(iso) {
+  const m = /^P(?:(\d+)D)?T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+(?:\.\d+)?)S)?$/.exec(iso ?? '')
+  if (!m) return null
+  return Math.round(
+    (Number(m[1] || 0) * 86400) + (Number(m[2] || 0) * 3600) +
+    (Number(m[3] || 0) * 60) + Number(m[4] || 0)
+  )
+}
+
+const FORMAT_BOUNDS = { SHORTS: 60, MID: 180 }
+
+function videoFormat(sec) {
+  if (sec == null) return 'unknown'
+  if (sec <= FORMAT_BOUNDS.SHORTS) return 'shorts'
+  if (sec <= FORMAT_BOUNDS.MID) return 'mid'
+  return 'long'
+}
+
+// 형식 필터를 쿼리에 얹는다. 'all' 이면 그대로 둔다.
+function applyFormatFilter(q, format) {
+  if (format === 'shorts') return q.lte('duration_sec', FORMAT_BOUNDS.SHORTS)
+  if (format === 'mid') return q.gt('duration_sec', FORMAT_BOUNDS.SHORTS).lte('duration_sec', FORMAT_BOUNDS.MID)
+  if (format === 'long') return q.gt('duration_sec', FORMAT_BOUNDS.MID)
+  return q
 }
 
 // ---------------------------------------------------------------- 저장
@@ -108,7 +136,7 @@ function scoreVideo(video, cfg, source) {
   return score
 }
 
-async function saveVideos(items, source, cfg) {
+async function saveVideos(items, source, cfg, opts = {}) {
   if (items.length === 0) return 0
 
   const videoRows = items.map((v) => ({
@@ -122,6 +150,7 @@ async function saveVideos(items, source, cfg) {
     views: Number(v.statistics?.viewCount ?? 0),
     like_count: Number(v.statistics?.likeCount ?? 0),
     comment_count: Number(v.statistics?.commentCount ?? 0),
+    duration_sec: parseDuration(v.contentDetails?.duration),
     score: scoreVideo(v, cfg, source),
     source
   }))
@@ -132,15 +161,18 @@ async function saveVideos(items, source, cfg) {
   const { error: vErr } = await supabase.rpc('upsert_videos', { payload: videoRows })
   if (vErr) throw vErr
 
-  const snapRows = items.map((v) => ({
-    video_id: v.id,
-    views: Number(v.statistics?.viewCount ?? 0),
-    likes: Number(v.statistics?.likeCount ?? 0),
-    comments: Number(v.statistics?.commentCount ?? 0)
-  }))
+  // 재생시간 백필처럼 통계를 다시 읽는 목적이 아닌 호출은 스냅샷을 남기지 않는다
+  if (opts.snapshot !== false) {
+    const snapRows = items.map((v) => ({
+      video_id: v.id,
+      views: Number(v.statistics?.viewCount ?? 0),
+      likes: Number(v.statistics?.likeCount ?? 0),
+      comments: Number(v.statistics?.commentCount ?? 0)
+    }))
 
-  const { error: sErr } = await supabase.from('yt_snapshots').insert(snapRows)
-  if (sErr) throw sErr
+    const { error: sErr } = await supabase.from('yt_snapshots').insert(snapRows)
+    if (sErr) throw sErr
+  }
 
   return items.length
 }
@@ -312,6 +344,32 @@ async function backfillChannel(w, cfg, budget) {
   return { used, saved, seen }
 }
 
+const DURATION_UNIT_BUDGET = 20 // 1회 수집에서 재생시간 백필에 쓸 유닛 (50개당 1유닛)
+
+// 기존 수집분은 duration_sec 이 없다. 매 수집마다 예산만큼 채워 넣는다.
+async function backfillDurations(cfg) {
+  let used = 0
+  let filled = 0
+
+  while (used < DURATION_UNIT_BUDGET) {
+    const { data, error } = await supabase
+      .from('yt_videos')
+      .select('video_id')
+      .is('duration_sec', null)
+      .limit(50)
+    if (error) throw error
+    if (!data || data.length === 0) break
+
+    const details = await fetchVideoDetails(data.map((r) => r.video_id))
+    used += 1
+    if (details.length === 0) break
+
+    filled += await saveVideos(details, 'duration-backfill', cfg, { snapshot: false })
+    if (data.length < 50) break
+  }
+  return { used, filled }
+}
+
 // 채널별 조회수 중앙값 대비 배율.
 //
 // 처음에는 JS 에서 계산해 upsert 했는데 한 건도 반영되지 않았다. PostgREST 의 upsert 는
@@ -449,6 +507,16 @@ async function collect() {
     } catch (err) {
       report.errors.push(`백카탈로그: ${err.message}`)
     }
+  }
+
+  // c-2. 재생시간이 비어 있는 과거 영상 채우기
+  try {
+    const r = await backfillDurations(cfg)
+    report.durations = r.filled
+    report.units += r.used
+  } catch (err) {
+    console.error('[collect] 재생시간 백필 실패:', err.message)
+    report.errors.push(`재생시간: ${err.message}`)
   }
 
   // d. 채널 정보(구독자·최근 중앙값) — 하루 1회
@@ -738,7 +806,7 @@ app.get('/api/dig', requireAuth, async (req, res) => {
     const oldest = new Date(now - maxDays * 864e5).toISOString()
 
     // 정렬 기준이 계산값이라 후보를 넉넉히 받아 서버에서 줄 세운다
-    const { group = 'all', subs = 'all' } = req.query
+    const { group = 'all', subs = 'all', format = 'long' } = req.query
 
     let q = supabase
       .from('yt_videos')
@@ -749,6 +817,7 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       .gte('score', 0)
       .order('multiple', { ascending: false })
       .limit(600)
+    q = applyFormatFilter(q, format)
     if (channel !== 'all') q = q.eq('channel_id', channel)
     if (group !== 'all') {
       const ids = await groupChannelIds(group)
@@ -799,7 +868,7 @@ app.get('/api/dig', requireAuth, async (req, res) => {
 // 📡 신작 — 감시 채널의 최근 30일 영상
 app.get('/api/fresh', requireAuth, async (req, res) => {
   try {
-    const { group = 'all', channel = 'all', subs = 'all' } = req.query
+    const { group = 'all', channel = 'all', subs = 'all', format = 'long' } = req.query
 
     let ids
     if (group !== 'all') {
@@ -813,7 +882,7 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
     if (ids.length === 0) return res.json([])
 
     const since = new Date(Date.now() - 30 * 864e5).toISOString()
-    const { data, error } = await supabase
+    let fq = supabase
       .from('yt_videos')
       .select('*')
       .in('channel_id', ids)
@@ -821,6 +890,9 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
       .gte('score', 0)
       .order('published_at', { ascending: false })
       .limit(200)
+    fq = applyFormatFilter(fq, format)
+
+    const { data, error } = await fq
     if (error) throw error
 
     const chans = await channelMap()

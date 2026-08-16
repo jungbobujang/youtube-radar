@@ -160,6 +160,11 @@
   }
   .chip-g:hover { opacity: 0.75; }
   .chip-g-on { opacity: 1; border-color: var(--ink); background: #fff; }
+
+  .fmt { display: flex; border: 1px solid var(--line); border-radius: var(--radius); overflow: hidden; background: var(--surface); }
+  .fmt-b { border: none; background: none; padding: 7px 11px; font-size: 13px; color: var(--ink-faint); }
+  .fmt-b:hover { color: var(--ink-soft); }
+  .fmt-on { background: var(--ink); color: #fff; }
   .hits { font-size: 11px; color: var(--accent); flex: none; max-width: 180px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
   .sec { font-size: 13px; font-weight: 700; margin: 22px 0 8px; }
@@ -218,12 +223,17 @@ let digChannel = 'all'
 let digSort = 'dig'
 let digGroup = 'all'
 let digSubs = 'all'
+let digFormat = 'long' // 주력이 롱폼이라 기본값
 
 const SUB_OPTS = [['all', '구독자 전체'], ['small', '~5만'], ['mid', '5~30만'], ['large', '30만+']]
+const FMT_OPTS = [['long', '롱폼'], ['mid', '미드(1~3분)'], ['shorts', '쇼츠'], ['all', '형식 전체']]
 
 function filterBar(extra = '') {
   return `
     ${extra}
+    <div class="fmt" role="group" aria-label="형식">
+      ${FMT_OPTS.map(([v, t]) => `<button class="fmt-b ${digFormat === v ? 'fmt-on' : ''}" data-fmt="${v}">${t}</button>`).join('')}
+    </div>
     <select id="f-group">
       <option value="all">모든 그룹</option>
       ${settings.groups.map((g) => `<option value="${esc(g.id)}" ${digGroup === g.id ? 'selected' : ''}>${esc(g.icon)} ${esc(g.name)}</option>`).join('')}
@@ -244,10 +254,21 @@ function wireFilters() {
   bind('#f-group', (v) => { digGroup = v })
   bind('#f-channel', (v) => { digChannel = v })
   bind('#f-subs', (v) => { digSubs = v })
+  document.querySelectorAll('[data-fmt]').forEach((b) => {
+    b.onclick = () => { digFormat = b.dataset.fmt; render() }
+  })
 }
 
 function filterQuery() {
-  return `group=${encodeURIComponent(digGroup)}&channel=${encodeURIComponent(digChannel)}&subs=${digSubs}`
+  return `group=${encodeURIComponent(digGroup)}&channel=${encodeURIComponent(digChannel)}`
+    + `&subs=${digSubs}&format=${digFormat}`
+}
+
+function durLabel(sec) {
+  if (sec == null) return ''
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return `${m}:${String(s).padStart(2, '0')}`
 }
 
 // 유튜브 영상 카테고리 (KR 주요 항목)
@@ -300,6 +321,7 @@ function videoRow(v, extra = '', opts = {}) {
         <span>${esc(v.channel_title || '')}</span>
         <span>조회 ${fmt(v.views ?? v.latest)}</span>
         <span>${day(v.published_at)}</span>
+        ${v.duration_sec != null ? `<span>${durLabel(v.duration_sec)}</span>` : ''}
       </div>
     </div>
     ${extra}
