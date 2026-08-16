@@ -362,6 +362,51 @@ function deriveMetrics(v, channel) {
   }
 }
 
+// ---------------------------------------------------------------- 지표 등급
+//
+// 절대 기준(배율 3배 이상은 좋음 같은 식)은 채널 성격에 따라 쉽게 무의미해진다.
+// 지금 보고 있는 목록의 분포로 줄 세운다 — 상위 25% great, 하위 25% low, 나머지 normal.
+const GRADE_MIN_SAMPLE = 8 // 표본이 이보다 적으면 사분위가 의미 없어 등급을 매기지 않는다
+
+function quantile(sorted, q) {
+  const i = (sorted.length - 1) * q
+  const lo = Math.floor(i)
+  const hi = Math.ceil(i)
+  return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo)
+}
+
+function gradeBy(rows, get) {
+  const vals = rows.map(get).filter((n) => n != null && Number.isFinite(n)).sort((a, b) => a - b)
+  if (vals.length < GRADE_MIN_SAMPLE) return () => null
+
+  const p25 = quantile(vals, 0.25)
+  const p75 = quantile(vals, 0.75)
+  return (n) => {
+    if (n == null || !Number.isFinite(n)) return null
+    if (n >= p75) return 'great'
+    if (n <= p25) return 'low'
+    return 'normal'
+  }
+}
+
+// 세 지표는 축이 다르므로 각자의 분포로 따로 줄 세운다
+function attachGrades(rows) {
+  const num = (n) => (n == null ? null : Number(n))
+  const g = {
+    multiple: gradeBy(rows, (v) => num(v.multiple)),
+    reach: gradeBy(rows, (v) => num(v.reach)),
+    engage: gradeBy(rows, (v) => num(v.engage))
+  }
+  for (const v of rows) {
+    v.grade = {
+      multiple: g.multiple(num(v.multiple)),
+      reach: g.reach(num(v.reach)),
+      engage: g.engage(num(v.engage))
+    }
+  }
+  return rows
+}
+
 // ---------------------------------------------------------------- 에버그린
 
 // 일평균 조회수 + 스냅샷 기반 최근 N일 증가량.
@@ -1085,6 +1130,9 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       : Infinity
     for (const r of rows) r.hot_engage = r.engage >= cut && r.engage > 0
 
+    // 등급은 잘라내기 전 후보 전체의 분포로 매긴다 (화면 80건만 보면 분포가 좁아진다)
+    attachGrades(rows)
+
     // 정렬 기준이 될 수 있으므로 줄 세우기 전에 붙인다
     attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
 
@@ -1144,12 +1192,14 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
 
     const chans = await channelMap()
     const overrides = await formatOverrides()
-    const rows = (data ?? [])
+    const all = (data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
       .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
       .filter((v) => format === 'all' || v.format === format)
       .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
-      .slice(0, 80)
+
+    // 등급은 잘라내기 전 전체 분포로 매긴다
+    const rows = attachGrades(all).slice(0, 80)
 
     attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
     res.json(await attachSaturation(rows))

@@ -124,6 +124,12 @@
     border-radius: 999px; white-space: nowrap;
     background: #f1efe8; color: #444441;
   }
+  /* 분포 등급 — 숫자는 그대로 두고 등급만 색 글자로 병기한다 */
+  .g { font-style: normal; font-weight: 700; font-size: 9.5px; margin-left: 3px; }
+  .g-great { color: #0a6b4a; }
+  .g-normal { color: var(--ink-faint); }
+  .g-low { color: #c2554a; }
+
   .m-good, .m-fresh { background: #e1f5ee; color: #085041; }
   .m-warn, .m-sat, .m-dead { background: #faeeda; color: #633806; }
   /* 아래 둘은 많고 적음이 아니라 성격이 다른 신호라 톤을 따로 쓴다 */
@@ -510,11 +516,16 @@ function saturationChip(v) {
 // 배수는 소수 1자리, 100 이상은 축약(x1.2천)해 뱃지 폭을 일정하게 둔다
 const ratio = (n) => (Number(n) >= 100 ? shortNum(n) : Number(n || 0).toFixed(1))
 
+// 지금 목록의 분포에서 상위 25% / 하위 25% 를 등급으로 병기한다.
+// 표본이 적으면 서버가 등급을 비워 보내고, 그때는 숫자만 나온다.
+const GRADE_LABEL = { great: 'Great', normal: 'Normal', low: 'Low' }
+const gradeTag = (kind) => (kind ? `<em class="g g-${kind}">${GRADE_LABEL[kind]}</em>` : '')
+
 function metricBadges(v) {
   return `<span class="metrics">
-    <span class="m">x${ratio(v.multiple)}</span>
-    <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}</span>
-    <span class="m">참여 ${(v.engage ?? 0).toFixed(1)}%</span>
+    <span class="m">x${ratio(v.multiple)}${gradeTag(v.grade?.multiple)}</span>
+    <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}${gradeTag(v.grade?.reach)}</span>
+    <span class="m">참여 ${(v.engage ?? 0).toFixed(1)}%${gradeTag(v.grade?.engage)}</span>
     ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
     ${v.debate ? '<span class="m m-debate">🗣️ 토론형</span>' : ''}
     ${evergreenChip(v)}
