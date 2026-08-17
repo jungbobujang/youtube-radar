@@ -1327,9 +1327,13 @@ app.get('/api/discover', requireAuth, async (req, res) => {
 // 담아 둔 영상(pick_level >= 1)을 목록에서 뺀다.
 // ?picked=1 이면 그대로 두고(⭐ 포함 보기), 컬럼이 아직 없으면 아무것도 하지 않는다.
 // 이관 전 행은 pick_level 이 null 일 수 있어 null 도 '안 담김' 으로 본다.
-async function excludePicked(query, req) {
-  if (req.query.picked === '1') return query
-  if (!(await pickColumnsReady())) return query
+//
+// async 로 만들면 안 된다. supabase 쿼리 빌더는 thenable 이라, async 함수가 이걸
+// 반환하는 순간 await 되어 쿼리가 그 자리에서 실행되고 호출부는 빌더 대신 결과 객체를
+// 받는다. 그러면 뒤이어 .eq() 를 부를 때 "q.eq is not a function" 으로 터진다
+// (채널·그룹 필터를 걸었을 때만 드러나서 기본 화면 확인만으로는 놓쳤다).
+function excludePicked(query, req, ready) {
+  if (req.query.picked === '1' || !ready) return query
   return query.or('pick_level.is.null,pick_level.eq.0')
 }
 
@@ -1363,7 +1367,7 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       .order('multiple', { ascending: false })
       .limit(600)
     // 담아 둔 영상은 기본으로 빠진다. 같은 걸 두 번 검토하지 않기 위해서다.
-    q = await excludePicked(q, req)
+    q = excludePicked(q, req, await pickColumnsReady())
     if (channel !== 'all') q = q.eq('channel_id', channel)
     if (group !== 'all') {
       const ids = await groupChannelIds(group)
@@ -1450,7 +1454,7 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
       .gte('score', 0)
       .order('published_at', { ascending: false })
       .limit(300)
-    q = await excludePicked(q, req)
+    q = excludePicked(q, req, await pickColumnsReady())
 
     const { data, error } = await q
     if (error) throw error
