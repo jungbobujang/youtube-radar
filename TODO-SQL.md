@@ -103,6 +103,10 @@ keyword="역사" ->  3개 채널   keyword="지식" ->  1개 채널
 → **DB 는 더 손댈 게 없습니다.** 포화도 칩을 실제로 띄우려면 `server.js` 의
 `saturationMap()` 에서 구 대신 낱말을 고르도록 바꾸는 코드 수정이 필요합니다(별건).
 
+> **2026-08-17 해결.** `extractKeywords()` 가 2어절 구 대신 개별 명사를 뽑고,
+> `saturationMap()` 이 변별력 상위 2개 낱말을 각각 세어 최댓값을 쓰도록 고쳤습니다.
+> 발굴 탭 44건 중 **28건이 0 이 아닌 포화도**로 나옵니다(0 → 16건, 1 이상 → 28건).
+
 ```sql
 -- (1) 최근 증가량 — 스냅샷을 PostgREST 로 긁으면 1000행 상한에 잘려 값이 틀린다
 create or replace function public.video_velocity(ids text[], window_days int default 7)
@@ -231,10 +235,10 @@ drop table if exists public.yt_channel_snapshots;
 | `public.recompute_multiples()` | ✅ 정상 (배율 7,416건 갱신) | 배율이 없어 발굴 탭이 빈 화면 |
 | `public.yt_channel_snapshots` | ✅ 생성됨 (23채널 1일차 기록) | 주간 구독 증가만 안 보임 |
 | `public.video_velocity(...)` | ✅ 정상 (발굴 7/44 · 신작 58/80 측정) | 에버그린 `최근7일 +N` 이 항상 `측정 중` |
-| `public.topic_saturation(...)` | ✅ 정상 (낱말 직접 호출 시 18/16/3/1) | 주제 포화도 칩이 안 나옴 |
+| `public.topic_saturation(...)` | ✅ 정상 (발굴 44건 중 28건 0 아님) | 주제 포화도 칩이 안 나옴 |
 | `yt_videos.pick_level` · `target_group` | ✅ 생성됨 (즐겨찾기 7건 ⭐ 이관) | 후보함 잠김, `POST /api/pick` 503 |
 
 **DB 쪽 미실행 항목은 남아 있지 않습니다.** 화면에 아직 안 채워진 값은 두 가지 이유뿐입니다.
 
 1. 에버그린 `측정 중` — 스냅샷이 2개 쌓일 때까지 기다리면 됩니다 (시간 문제)
-2. 포화도 칩 미표시 — `saturationMap()` 의 핵심어 선택 문제 (0번 항목 참고, 코드 수정 건)
+2. ~~포화도 칩 미표시 — `saturationMap()` 의 핵심어 선택 문제~~ → 2026-08-17 코드 수정 완료

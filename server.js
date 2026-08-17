@@ -325,6 +325,7 @@ const METRIC = {
   DEBATE_RATIO: 0.15,     // 댓글/좋아요가 이 위면 🗣️ 토론형
   VELOCITY_WINDOW_D: 7,   // 에버그린 최근 증가량 창(일)
   SATURATION_WINDOW_D: 90,// 주제 포화도를 볼 최근 N일
+  SATURATION_KEYWORDS: 2, // 영상 1건당 포화도를 세볼 핵심 낱말 개수
   SATURATION_WARN: 2,     // 다른 채널 이만큼부터 ⚠️ 재탕 경고
   WEEKLY_TOP: 10,         // 주간 리포트 신작 상위 개수
   WEEKLY_DIG_MIN: 5,      // 주간 리포트에 올릴 최소 배율
@@ -622,14 +623,17 @@ function attachEvergreen(rows, vel) {
 
 // 이 영상의 핵심어를 다른 채널이 최근에 몇 곳이나 다뤘는지.
 // 영상마다 ilike 를 따로 던지면 80건에 80왕복이라, 핵심어를 묶어 DB 함수로 넘긴다.
+// 낱말 하나만 보면 우연히 안 겹칠 수 있어 변별력 상위 2개를 각각 세고 큰 쪽을 쓴다.
+// (DB 함수는 payload 행 단위로 세므로 같은 video_id 가 여러 줄이어도 그대로 동작한다)
 async function saturationMap(rows) {
-  const payload = rows
-    .map((v) => ({
-      video_id: v.video_id,
-      channel_id: v.channel_id,
-      keyword: extractKeywords(v.title)[0] ?? ''
-    }))
-    .filter((x) => x.keyword.length >= 2)
+  const payload = []
+  for (const v of rows) {
+    for (const keyword of extractKeywords(v.title).slice(0, METRIC.SATURATION_KEYWORDS)) {
+      if (keyword.length >= 2) {
+        payload.push({ video_id: v.video_id, channel_id: v.channel_id, keyword })
+      }
+    }
+  }
   if (payload.length === 0) return new Map()
 
   const { data, error } = await supabase.rpc('topic_saturation', {
@@ -639,7 +643,13 @@ async function saturationMap(rows) {
     console.warn(`[metric] 주제 포화도 계산 실패(함수 없음?): ${error.message}`)
     return new Map()
   }
-  return new Map((data ?? []).map((r) => [r.video_id, Number(r.channels ?? 0)]))
+
+  const out = new Map()
+  for (const r of data ?? []) {
+    const n = Number(r.channels ?? 0)
+    out.set(r.video_id, Math.max(out.get(r.video_id) ?? 0, n))
+  }
+  return out
 }
 
 // 핵심어를 못 뽑았거나 함수가 없으면 null 로 두어 화면에서 아무것도 그리지 않는다
@@ -1175,32 +1185,83 @@ async function resolveChannelId(input) {
 
 // ---------------------------------------------------------------- 키워드 추출
 
-// 제목에서 검색에 쓸 만한 핵심어를 뽑는다. 형태소 분석기 없이 조사/불용어만 걷어낸다.
+// 제목에서 검색에 쓸 만한 핵심 낱말을 뽑는다. 형태소 분석기 없이 조사/어미/불용어만 걷어낸다.
+// 2어절 구는 쓰지 않는다. 같은 구를 제목에 그대로 쓰는 다른 채널이 거의 없어
+// 포화도가 항상 0 으로 나왔다(TODO-SQL.md 참고).
 const PARTICLES = /(은|는|이|가|을|를|의|에|에서|에게|으로|로|와|과|도|만|까지|부터|보다|처럼|라고|이라고|한테|께서|이나|나|든지|조차|마저)$/
-const STOPWORDS = new Set([
-  '그', '이', '저', '것', '수', '등', '및', '더', '왜', '어떻게', '무엇', '정말', '진짜',
-  '가장', '너무', '아주', '다시', '지금', '오늘', '우리', '당신', '사람', '이유', '방법',
-  '영상', '공식', '풀버전', '하이라이트', '레전드', '모음', 'shorts', 'the', 'a', 'of', 'to'
-])
 
+// 용언 어미 (1) 떼면 명사 어간이 남는 것. "요리하는"→"요리",
+// 한 글자만 남으면 아래 길이 필터에서 빠진다("말하는"→"말"→탈락).
+const VERB_TAILS = /(하는|하며|하면서|하고|하다|한다|합니다|했다|해야|해서|하기|하면|해도|되는|된다|되다|됐다|되어|있는|있다|없는|없다|같은|같다|받는|받은|받아|받다|당하는|당한|당해|당하다|위한|위해|대한|대해|관한|관해)$/
+
+// 용언 어미 (2) 이게 붙었으면 명사가 아니라 서술어·부사·관형형이라 통째로 버린다.
+// "울었습니다"·"던져보세요"·"최적화된"·"현실적인"·"생존할" 같은 말이 뽑히던 것을 막는다.
+// `.{2,}` 는 3글자 이상일 때만 걸리게 해 2글자 명사(바다, 행운, 재난, 런던)를 지키기 위한 것.
+const VERB_FORMS = [
+  /.{2,}다$/,                  // 죽는다, 울었습니다, 갔다
+  /.{2,}요$/, /죠$/,            // 왔네요, 던져보세요
+  /.{2,}(한|된|운)$/,           // 이혼한, 최적화된, 아름다운
+  /적인$/,                     // 현실적인, 결정적인
+  /.{2,}(할|될|볼)$/,           // 생존할, 가능할
+  /[어아여워해]서$/,            // 아름다워서 (계약서·보고서는 안 걸린다)
+  /.{2,}던$/,                  // 몰랐던 (런던은 두 글자라 통과)
+  /.지지$/,                    // 무너지지
+  /[어여아혀겨워려우]진$/,       // 밝혀진
+  /[려어아]주(는|다|기)?$/,      // 알려주는
+  /(도록|는가|지만|는데|니까|거든|이자)$/
+]
+
+// 불용어 사전 — 어느 제목에나 붙는 범용어. 포화도를 세면 수십 채널이 걸려 변별력이 없다.
+// 새 범용어가 눈에 띄면 여기에만 추가하면 된다.
+const STOPWORDS = [
+  '그', '이', '저', '것', '수', '등', '및', '더', '왜', '어떻게', '무엇',
+  '정말', '진짜', '완전', '역대급', '최고', '최악', '충격', '경악', '소름',
+  '결국', '드디어', '갑자기', '가장', '너무', '아주', '다시', '지금', '오늘',
+  '어제', '내일', '요즘', '우리', '당신', '여러분', '사람', '사람들',
+  '이유', '방법', '이야기', '생각', '순간', '차이', '정도', '경우', '문제',
+  '상황', '시작', '마지막', '전부', '모든', '가지', '번째', '개월',
+  '이렇게', '그렇게', '저렇게', '절대', '과연', '도대체', '솔직히', '사실',
+  '유독', '남들', '남자', '여자',
+  '영상', '공식', '풀버전', '하이라이트', '레전드', '모음', '자막', '리뷰',
+  'shorts', 'the', 'a', 'of', 'to', 'in', 'for', 'vs', 'feat', 'ep', 'part', 'vol'
+]
+const STOPWORD_SET = new Set(STOPWORDS)
+
+const isNounish = (w) => !VERB_FORMS.some((re) => re.test(w))
+
+// 변별력 점수 — 긴 낱말일수록 그 제목에만 있는 말일 확률이 높다("쇼펜하우어" > "가치").
+// 길이가 같으면 제목 앞쪽에 나온 낱말을 택한다(보통 주제어가 앞에 온다).
+function distinctiveness(word, index) {
+  return word.length * 10 - Math.min(index, 9)
+}
+
+// 변별력이 높은 순으로 정렬된 낱말 목록을 준다.
 function extractKeywords(title) {
   const cleaned = String(title ?? '')
     .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ') // 이모지
     .replace(/[[\]()（）{}<>|·・…"'"'`~!?.,:;#@*/\\_+=-]/g, ' ')
+    .replace(/[‘’“”「」『』〈〉《》【】]/g, ' ') // 굽은 따옴표·한중일 괄호
+    .replace(/[㄰-㆏]/g, ' ') // 제목 구분선으로 쓰는 홑자모 (ㅣ, ㅡ)
     .replace(/\s+/g, ' ')
     .trim()
 
+  // 어미는 떼기 전후로 두 번 본다. "죽는다해도"→"죽는다" 처럼 떼고 나서야 드러나기도 한다.
   const words = cleaned.split(' ')
-    .map((w) => w.replace(PARTICLES, ''))
-    .filter((w) => w.length >= 2 && !STOPWORDS.has(w.toLowerCase()) && !/^\d+$/.test(w))
+    .filter(isNounish)
+    .map((w) => w.replace(/^\d+/, '').replace(VERB_TAILS, '').replace(PARTICLES, ''))
+    .filter((w) => w.length >= 2 && !STOPWORD_SET.has(w.toLowerCase()) &&
+      !/^\d+$/.test(w) && isNounish(w))
 
-  if (words.length === 0) return []
+  const seen = new Set()
+  const uniq = []
+  words.forEach((w, i) => {
+    const key = w.toLowerCase()
+    if (seen.has(key)) return
+    seen.add(key)
+    uniq.push({ word: w, rank: distinctiveness(w, i) })
+  })
 
-  // 2어절 명사구를 우선 후보로, 그다음 단어 단위
-  const phrases = []
-  for (let i = 0; i < words.length - 1; i++) phrases.push(`${words[i]} ${words[i + 1]}`)
-
-  return [...new Set([...phrases.slice(0, 3), ...words.slice(0, 5)])]
+  return uniq.sort((a, b) => b.rank - a.rank).map((x) => x.word).slice(0, 5)
 }
 
 async function relatedFromDb(keyword, excludeId) {
@@ -1901,8 +1962,8 @@ app.get('/api/related', requireAuth, async (req, res) => {
       return res.json({ keyword, keywords, results: await relatedFromDb(keyword, video_id) })
     }
 
-    // 명사구를 먼저 시도하되, 조사를 뗀 구가 원문과 안 맞아 0건이면
-    // 다음 후보로 넘어간다. 빈 패널이 뜨는 것보다 낫다.
+    // 변별력이 높은 낱말부터 시도하되, 0건이면 다음 후보로 넘어간다.
+    // 빈 패널이 뜨는 것보다 낫다.
     for (const cand of keywords) {
       const results = await relatedFromDb(cand, video_id)
       if (results.length > 0) return res.json({ keyword: cand, keywords, results })
