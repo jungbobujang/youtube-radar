@@ -592,16 +592,24 @@ const ratio = (n) => (Number(n) >= 100 ? shortNum(n) : Number(n || 0).toFixed(1)
 const GRADE_LABEL = { great: 'Great', normal: 'Normal', low: 'Low' }
 const gradeTag = (kind) => (kind ? `<em class="g g-${kind}">${GRADE_LABEL[kind]}</em>` : '')
 
+// 침투력 등급은 전체가 아니라 같은 체급(구독자 구간) 안에서의 상대평가다.
+function reachTip(v) {
+  const base = '침투력 = 조회수 / 구독자수 · 등급은 같은 체급 내 상대평가'
+  if (!v.tier_label) return `${base} (구독자 미확인이라 등급 없음)`
+  const pct = v.reach_pct == null ? '' : ` · 상위 ${Math.max(1, Math.round((1 - v.reach_pct) * 100))}%`
+  return `${base}\n체급 ${v.tier_label}${pct}`
+}
+
 function metricBadges(v) {
   return `<span class="metrics">
-    <span class="m">x${ratio(v.multiple)}${gradeTag(v.grade?.multiple)}</span>
-    <span class="m">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}${gradeTag(v.grade?.reach)}</span>
-    <span class="m">참여 ${(v.engage ?? 0).toFixed(1)}%${gradeTag(v.grade?.engage)}</span>
+    <span class="m" title="채널·형식별 조회수 중앙값 대비 배율">x${ratio(v.multiple)}${gradeTag(v.grade?.multiple)}</span>
+    <span class="m" title="${reachTip(v)}">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}${gradeTag(v.grade?.reach)}</span>
+    <span class="m" title="(좋아요 + 댓글×3) / 조회수">참여 ${(v.engage ?? 0).toFixed(1)}%${gradeTag(v.grade?.engage)}</span>
     ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
     ${v.debate ? '<span class="m m-debate">🗣️ 토론형</span>' : ''}
     ${evergreenChip(v)}
     ${saturationChip(v)}
-    ${v.dead_channel ? '<span class="m m-dead">⚠️</span>' : ''}
+    ${v.dead_channel ? `<span class="m m-dead" title="채널 활력(최근 90일 중앙값/구독자)이 같은 체급 중앙값의 절반 이하">⚠️ 활력 낮음</span>` : ''}
   </span>`
 }
 

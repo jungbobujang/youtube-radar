@@ -313,7 +313,10 @@ const METRIC = {
   ENGAGE_DIVISOR: 5,      // 참여율이 점수에 기여하는 정도 (클수록 영향 작아짐)
   PER_CHANNEL_CAP: 3,     // 발굴 목록에서 한 채널이 차지할 수 있는 최대 개수
   COMMENT_WEIGHT: 3,      // 댓글 1개를 좋아요 몇 개로 볼지
-  DEAD_CHANNEL: 0.05,     // 채널활력이 이 아래면 ⚠️ (죽은 채널의 과거 영광)
+  DEAD_VS_TIER: 0.5,      // 같은 체급 활력 중앙값의 이 배 이하 (⚠️ 1차 조건)
+  DEAD_ABS: 0.05,         // 그리고 절대 활력도 이 아래 (⚠️ 2차 조건 · AND)
+  VITALITY_MIN_CH: 4,     // 체급에 채널이 이만큼은 있어야 활력 기준을 세운다
+  REACH_PCT_FLOOR: 0.25,  // 발굴점수의 침투력 항 하한 (0 이면 최하위가 점수를 0으로 만든다)
   HOT_ENGAGE_PCTL: 0.75,  // 참여율 상위 25% 에 💬 진한반응
   CHANNEL_TTL_H: 24,      // 구독자 수 갱신 주기(시간)
   MEDIAN_WINDOW_D: 90,    // 채널활력용 최근 N일
@@ -326,7 +329,103 @@ const METRIC = {
   WEEKLY_DIG_MAX: 20      // 주간 리포트 발굴분 최대 개수
 }
 
-function deriveMetrics(v, channel) {
+// ---------------------------------------------------------------- 체급
+//
+// 침투력과 활력은 구독자 수에 직접 매인 지표다. 100만 채널의 침투력 0.5 와
+// 1만 채널의 0.5 는 전혀 다른 사건인데, 한 줄로 세우면 큰 채널이 늘 아래에 깔린다.
+// 그래서 등급·경고·발굴점수는 모두 "같은 체급 안에서" 본다.
+const SUB_TIERS = [
+  { key: 't1', label: '~5만', min: 0, max: 50000 },
+  { key: 't2', label: '5~30만', min: 50000, max: 300000 },
+  { key: 't3', label: '30~100만', min: 300000, max: 1000000 },
+  { key: 't4', label: '100만+', min: 1000000, max: Infinity }
+]
+
+const TIER_LABEL = new Map(SUB_TIERS.map((t) => [t.key, t.label]))
+
+// 구독자 수를 아직 모르는 채널은 체급이 없다 (등급·경고에서 제외된다)
+function subTier(subs) {
+  const n = Number(subs ?? 0)
+  if (!(n > 0)) return null
+  return (SUB_TIERS.find((t) => n >= t.min && n < t.max) ?? SUB_TIERS[SUB_TIERS.length - 1]).key
+}
+
+function median(sorted) {
+  if (sorted.length === 0) return null
+  const mid = Math.floor(sorted.length / 2)
+  return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
+}
+
+// 체급별 활력(최근 중앙값/구독자) 중앙값. 화면에 뭐가 떠 있든 흔들리지 않게
+// 영상이 아니라 채널 전체를 모집단으로 쓴다.
+function vitalityBaselines(chans) {
+  const byTier = new Map()
+  for (const c of chans.values()) {
+    const subs = Number(c.subscriber_count ?? 0)
+    const med = Number(c.recent_median_views ?? 0)
+    const tier = subTier(subs)
+    if (!tier || !(med > 0)) continue
+    if (!byTier.has(tier)) byTier.set(tier, [])
+    byTier.get(tier).push(med / subs)
+  }
+
+  const out = new Map()
+  for (const [tier, arr] of byTier) {
+    // 표본이 적으면 기준을 세우지 않는다. 없으면 경고를 아예 띄우지 않는다 —
+    // 근거 없는 ⚠️ 보다 조용한 편이 낫다.
+    if (arr.length < METRIC.VITALITY_MIN_CH) continue
+    out.set(tier, median(arr.sort((a, b) => a - b)))
+  }
+  return out
+}
+
+async function channelContext() {
+  const chans = await channelMap()
+  return { chans, vitality: vitalityBaselines(chans) }
+}
+
+// 같은 체급 안에서의 백분위(0~1). 동점은 중간 순위로 본다.
+function percentileRank(sorted, x) {
+  if (sorted.length === 0) return null
+  if (sorted.length === 1) return 0.5
+  let below = 0
+  let equal = 0
+  for (const n of sorted) {
+    if (n < x) below++
+    else if (n === x) equal++
+  }
+  return (below + equal / 2) / sorted.length
+}
+
+// 발굴점수의 침투력 항을 "체급 내 백분위" 로 갈아끼운다.
+// 절대값 log(1+침투력) 을 쓰면 구독자가 적을수록 유리해 큰 채널 영상이 부당하게 밀린다.
+function rescoreByTier(rows) {
+  const pools = new Map()
+  for (const v of rows) {
+    if (v.reach == null) continue
+    const key = v.tier ?? 'unknown'
+    if (!pools.has(key)) pools.set(key, [])
+    pools.get(key).push(Number(v.reach))
+  }
+  for (const arr of pools.values()) arr.sort((a, b) => a - b)
+
+  for (const v of rows) {
+    const pool = pools.get(v.tier ?? 'unknown')
+    // 침투력을 모르면(구독자 미확인) 중립값 0.5 로 둔다
+    const pct = v.reach == null || !pool ? 0.5 : percentileRank(pool, Number(v.reach))
+    v.reach_pct = Number(pct.toFixed(3))
+
+    const term = METRIC.REACH_PCT_FLOOR + (1 - METRIC.REACH_PCT_FLOOR) * pct
+    v.dig_score = Number((
+      Math.log(1 + Math.max(Number(v.multiple ?? 0), 0)) *
+      term *
+      (1 + Number(v.engage ?? 0) / METRIC.ENGAGE_DIVISOR)
+    ).toFixed(2))
+  }
+  return rows
+}
+
+function deriveMetrics(v, channel, baselines) {
   const views = Number(v.views ?? 0)
   const likes = Number(v.like_count ?? 0)
   const comments = Number(v.comment_count ?? 0)
@@ -345,18 +444,35 @@ function deriveMetrics(v, channel) {
   // 좋아요가 0 이면 대개 표시가 꺼진 영상이라 비율을 내지 않는다.
   const debate = likes > 0 ? comments / likes : null
 
-  // 구독자 수를 아직 모르면 침투력을 1로 두어 배율·참여율만으로 점수를 낸다
+  // 구독자 수를 아직 모르면 침투력을 1로 두어 배율·참여율만으로 점수를 낸다.
+  // 목록 전체를 볼 수 있는 rescoreByTier() 가 이 값을 체급 백분위 기준으로 덮어쓴다.
   const digScore =
     Math.log(1 + Math.max(multiple, 0)) *
     Math.log(1 + Math.max(reach ?? 1, 0)) *
     (1 + engage / METRIC.ENGAGE_DIVISOR)
+
+  const tier = subTier(subs)
+
+  // 활력 경고: 같은 체급 중앙값의 절반 이하 **그리고** 절대값도 바닥일 때만.
+  //
+  // 체급 상대평가만 쓰면 새 오탐이 생긴다. 실측 예: '어른의 지혜' 는 활력 0.174
+  // (구독자의 17% 가 최근 영상을 본다 — 절대적으로 건강하다) 인데, ~5만 체급이
+  // 워낙 활발해서(중앙값 0.79) 절반 기준에 걸린다. 그래서 절대 기준과 AND 로 묶었다.
+  // 순수 체급 기준으로 되돌리려면 뒤 조건 한 줄만 빼면 된다.
+  const base = tier && baselines ? baselines.get(tier) : null
+  const dead = vitality != null && base != null &&
+    vitality <= base * METRIC.DEAD_VS_TIER &&
+    vitality < METRIC.DEAD_ABS
 
   return {
     reach: reach == null ? null : Number(reach.toFixed(2)),
     engage: Number(engage.toFixed(2)),
     vitality: vitality == null ? null : Number(vitality.toFixed(4)),
     dig_score: Number(digScore.toFixed(2)),
-    dead_channel: vitality != null && vitality < METRIC.DEAD_CHANNEL,
+    tier,
+    tier_label: tier ? TIER_LABEL.get(tier) : null,
+    vitality_base: base == null ? null : Number(base.toFixed(4)),
+    dead_channel: dead,
     debate_ratio: debate == null ? null : Number(debate.toFixed(3)),
     debate: debate != null && debate >= METRIC.DEBATE_RATIO
   }
@@ -389,18 +505,32 @@ function gradeBy(rows, get) {
   }
 }
 
-// 세 지표는 축이 다르므로 각자의 분포로 따로 줄 세운다
+// 세 지표는 축이 다르므로 각자의 분포로 따로 줄 세운다.
+// 침투력만은 전체가 아니라 같은 체급 안에서 비교한다 — 구독자 수에 직접 매인 지표라
+// 한 줄로 세우면 큰 채널이 늘 Low 로 깔린다.
 function attachGrades(rows) {
   const num = (n) => (n == null ? null : Number(n))
   const g = {
     multiple: gradeBy(rows, (v) => num(v.multiple)),
-    reach: gradeBy(rows, (v) => num(v.reach)),
     engage: gradeBy(rows, (v) => num(v.engage))
   }
+
+  const byTier = new Map()
+  for (const v of rows) {
+    const key = v.tier ?? 'unknown'
+    if (!byTier.has(key)) byTier.set(key, [])
+    byTier.get(key).push(v)
+  }
+  // 체급 표본이 GRADE_MIN_SAMPLE 미만이면 그 체급은 등급을 비운다 (숫자만 보여준다)
+  const reachGrade = new Map()
+  for (const [key, group] of byTier) {
+    reachGrade.set(key, gradeBy(group, (v) => num(v.reach)))
+  }
+
   for (const v of rows) {
     v.grade = {
       multiple: g.multiple(num(v.multiple)),
-      reach: g.reach(num(v.reach)),
+      reach: reachGrade.get(v.tier ?? 'unknown')(num(v.reach)),
       engage: g.engage(num(v.engage))
     }
   }
@@ -1037,10 +1167,12 @@ async function relatedFromDb(keyword, excludeId) {
     .limit(200)
   if (error) throw error
 
-  const chans = await channelMap()
-  return (data ?? [])
+  const { chans, vitality } = await channelContext()
+  const rows = (data ?? [])
     .filter((v) => v.video_id !== excludeId)
-    .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+    .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+
+  return rescoreByTier(rows)
     .sort((a, b) => b.dig_score - a.dig_score)
     .slice(0, 10)
 }
@@ -1183,13 +1315,16 @@ app.get('/api/dig', requireAuth, async (req, res) => {
     const { data, error } = await q
     if (error) throw error
 
-    const chans = await channelMap()
+    const { chans, vitality } = await channelContext()
     const overrides = await formatOverrides()
     const rows = (data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
       .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
       .filter((v) => format === 'all' || v.format === format)
-      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+
+    // 발굴점수의 침투력 항을 체급 백분위로 갈아끼운다 (정렬 기준이라 줄 세우기 전에)
+    rescoreByTier(rows)
 
     // 참여율 상위 25% 를 진한반응으로 표시
     const engages = rows.map((r) => r.engage).sort((a, b) => a - b)
@@ -1258,13 +1393,15 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
       .limit(300)
     if (error) throw error
 
-    const chans = await channelMap()
+    const { chans, vitality } = await channelContext()
     const overrides = await formatOverrides()
     const all = (data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
       .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
       .filter((v) => format === 'all' || v.format === format)
-      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+
+    rescoreByTier(all)
 
     // 등급은 잘라내기 전 전체 분포로 매긴다
     const rows = attachGrades(all).slice(0, 80)
@@ -1408,8 +1545,10 @@ app.get('/api/starred', requireAuth, async (req, res) => {
       .order('starred_at', { ascending: false })
       .limit(200)
     if (error) throw error
-    const chans = await channelMap()
-    const rows = (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id)) }))
+    const { chans, vitality } = await channelContext()
+    const rows = rescoreByTier(
+      (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+    )
 
     attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
     res.json(await attachSaturation(rows))
@@ -1425,12 +1564,12 @@ app.get('/api/starred', requireAuth, async (req, res) => {
 async function weeklyReport() {
   const since = new Date(Date.now() - 7 * DAY).toISOString()
 
-  const chans = await channelMap()
+  const { chans, vitality } = await channelContext()
   const overrides = await formatOverrides()
   const decorate = (v) => ({
     ...v,
     format: effectiveFormat(v, overrides),
-    ...deriveMetrics(v, chans.get(v.channel_id))
+    ...deriveMetrics(v, chans.get(v.channel_id), vitality)
   })
 
   // a. 지난 7일 신작 중 성과 상위 — 배율 우선, 같으면 조회수
@@ -1449,8 +1588,7 @@ async function weeklyReport() {
       .order('views', { ascending: false })
       .limit(500)
     if (error) throw error
-    topFresh = (data ?? [])
-      .map(decorate)
+    topFresh = rescoreByTier((data ?? []).map(decorate))
       .sort((a, b) =>
         (b.multiple ?? 0) - (a.multiple ?? 0) || (b.views ?? 0) - (a.views ?? 0))
       .slice(0, METRIC.WEEKLY_TOP)
@@ -1467,7 +1605,7 @@ async function weeklyReport() {
     .order('multiple', { ascending: false })
     .limit(200)
   if (dErr) throw dErr
-  const newDigs = (digs ?? []).map(decorate).slice(0, METRIC.WEEKLY_DIG_MAX)
+  const newDigs = rescoreByTier((digs ?? []).map(decorate)).slice(0, METRIC.WEEKLY_DIG_MAX)
 
   // c. 즐겨찾기 — 전체와 이번 주 추가분
   const { count: starTotal } = await supabase
