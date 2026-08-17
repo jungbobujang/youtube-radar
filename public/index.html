@@ -153,6 +153,8 @@
   /* 아래 둘은 많고 적음이 아니라 성격이 다른 신호라 톤을 따로 쓴다 */
   .m-hot { background: #fbeaf0; color: #72243e; }
   .m-debate { background: #e6f1fb; color: #0c447c; }
+  /* 민감 주제(🅐 전용) — 경고가 아니라 '어느 채널용인가' 표시라 톤을 따로 쓴다 */
+  .m-sensitive { background: #efe9fb; color: #4a2f7a; }
 
   .star {
     background: none; border: none; padding: 0 3px; flex: none;
@@ -790,6 +792,7 @@ function reachTip(v) {
 function metricBadges(v, extra = '') {
   return `<span class="metrics">
     ${extra}
+    ${sensitiveMark(v)}
     <span class="m" title="채널·형식별 조회수 중앙값 대비 배율">x${ratio(v.multiple)}${gradeTag(v.grade?.multiple)}</span>
     <span class="m" title="${reachTip(v)}">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}${gradeTag(v.grade?.reach)}</span>
     <span class="m" title="(좋아요 + 댓글×3) / 조회수">참여 ${(v.engage ?? 0).toFixed(1)}%${gradeTag(v.grade?.engage)}</span>
@@ -1071,12 +1074,35 @@ function auditionBadge() {
     🤖 예심 통과 <b>${fmt(n)}건</b>이 검토를 기다리고 있어요 — 후보함에서 보기 →</div>`
 }
 
-// 🤖 예심 통과 행의 버튼 — 승격하면 내 후보로, 제외하면 다시 안 올라온다
-function auditionTools(v) {
+// 🤖 예심 통과 행의 버튼 — 승격은 내 후보로, 킵은 보류 칸으로, 제외는 다시 안 올라온다.
+// 킵 칸에서는 킵 대신 '대기로' 를 둔다 (잘못 눌렀을 때 되돌리는 길).
+function auditionTools(v, { inKept = false, keptOn = true } = {}) {
   return `
     <button class="btn btn-sm" data-promote="${esc(v.video_id)}" title="내 후보로 올리기">⭐ 승격</button>
+    ${!keptOn ? '' : inKept
+      ? `<button class="btn-ghost btn-sm" data-unkeep="${esc(v.video_id)}"
+           title="검토 대기로 되돌리기">↩ 대기로</button>`
+      : `<button class="btn-ghost btn-sm" data-keep="${esc(v.video_id)}"
+           title="보류 — 킵 칸으로 옮깁니다 (나중에 다시 봅니다)">🤔 킵</button>`}
     <button class="btn-ghost btn-sm" data-drop="${esc(v.video_id)}"
       title="예심에서 빼기 (다시 올라오지 않습니다)">✕ 제외</button>`
+}
+
+// ⚠️🅐 — 교사 신분상 D 채널에 올리기 어려운 주제. 걸러 내지 않고 A 전용으로 표시만 한다.
+function sensitiveBadge(v) {
+  const hits = v.sensitive ?? []
+  if (hits.length === 0) return ''
+  const shown = hits.slice(0, 3).join(' · ')
+  const more = hits.length > 3 ? ` 외 ${hits.length - 3}` : ''
+  return `<span class="m m-sensitive" title="민감 주제 — A(부계정) 전용 · 걸린 말: ${esc(hits.join(', '))}">
+    ⚠️🅐 ${esc(shown)}${more}</span>`
+}
+
+// 발굴·신작처럼 목록이 긴 화면에서는 낱말 없이 작게만 붙인다
+function sensitiveMark(v) {
+  const hits = v.sensitive ?? []
+  if (hits.length === 0) return ''
+  return `<span class="m m-sensitive" title="민감 주제 — A(부계정) 전용 · 걸린 말: ${esc(hits.join(', '))}">🅐</span>`
 }
 
 // ⭐ 후보 / ❤️ 확정. ❤️ 를 다시 누르면 ⭐ 로 내린다.
@@ -1264,6 +1290,25 @@ function wireRows(panel) {
     }
   })
 
+  // 🤔 킵 / ↩ 대기로 — 칸을 옮기는 것이라 옮긴 뒤 다시 그린다
+  const moveKept = (sel, kept) => {
+    panel.querySelectorAll(sel).forEach((b) => {
+      const id = kept ? b.dataset.keep : b.dataset.unkeep
+      b.onclick = async () => {
+        const hidden = dropRow(b)
+        try {
+          await api('/api/pick', {
+            method: 'POST', body: JSON.stringify({ video_id: id, kept })
+          })
+          if (kept) bumpPending(panel, -1)
+          render()
+        } catch (e) { undropRow(hidden); toast(panel, e.message) }
+      }
+    })
+  }
+  moveKept('[data-keep]', true)
+  moveKept('[data-unkeep]', false)
+
   panel.querySelectorAll('[data-cmt]').forEach((b) => {
     b.onclick = () => toggleComments(panel, b.dataset.cmt, b.dataset.title)
   })
@@ -1370,8 +1415,10 @@ async function render() {
     }
 
     if (tab === 'picks') {
-      const { rows, auto = [], summary, ready, concept_ready: conceptReady } =
-        await api(`/api/picks?level=${pickLevel}&target=${pickTarget}`)
+      const {
+        rows, auto = [], sensitive = [], kept = [],
+        summary, ready, concept_ready: conceptReady, kept_ready: keptOn = false
+      } = await api(`/api/picks?level=${pickLevel}&target=${pickTarget}`)
       const chip = (val, label, n) => `<button class="btn-ghost btn-sm ${pickTarget === val ? 'fmt-on' : ''}"
         data-ptarget="${val}">${label}${n == null ? '' : ` ${n}`}</button>`
 
@@ -1385,9 +1432,28 @@ async function render() {
           ? auto.map((v) => videoRow(
               v,
               metricBadges(v) + ideaButton(v),
-              { tools: auditionTools(v) }
+              { tools: auditionTools(v, { keptOn }) }
             )).join('')
           : '<p class="muted" style="margin:0 0 10px">대기 중인 예심 통과분이 없어요. 수집이 끝날 때마다 자동으로 채워집니다.</p>'}
+
+        ${sensitive.length ? `
+          <h3 class="sec">🅐 전용 후보 <span class="muted">민감 주제 · ${sensitive.length}건</span></h3>
+          <p class="muted" style="margin:0 0 8px">
+            정치·갈등·종교처럼 D 채널에 올리기 어려운 주제입니다. 담으면 용도가 <b>A</b> 로 잡힙니다.
+          </p>
+          ${sensitive.map((v) => videoRow(
+            v,
+            metricBadges(v, sensitiveBadge(v)) + ideaButton(v),
+            { tools: auditionTools(v, { keptOn }) }
+          )).join('')}` : ''}
+
+        ${kept.length ? `
+          <h3 class="sec">🤔 킵 <span class="muted">(다시 볼 것) · ${kept.length}건</span></h3>
+          ${kept.map((v) => videoRow(
+            v,
+            metricBadges(v, sensitiveBadge(v)) + ideaButton(v),
+            { tools: auditionTools(v, { inKept: true, keptOn }) }
+          )).join('')}` : ''}
 
         <h3 class="sec">⭐ 내 후보</h3>
         <div class="filters">

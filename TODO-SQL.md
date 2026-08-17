@@ -5,13 +5,13 @@
 
 실행 전에도 서버는 죽지 않습니다. 해당 기능만 조용히 비어 있습니다.
 
-**⚠️ 실행 대기 5건** — `0-B. 개념 태그` · `0-C. 댓글 수집` · `0-D. 할당량 합산` ·
-`0-E. 설정 행 허용` · `0-F. 자동 예심`. 나머지는 전부 실행 완료됐습니다.
-문서는 무엇을 왜 넣었는지 남겨 두려고 그대로 둡니다.
+**⚠️ 실행 대기 1건 — `0-G. 예심 킵(보류)`.**
+`0-B` ~ `0-F` 는 2026-08-17 실행 완료했습니다(예심 5건 표시·댓글 50개 수집·설정 토글
+저장·할당량 합산 모두 실측 확인). 문서는 무엇을 왜 넣었는지 남겨 두려고 그대로 둡니다.
 
 ---
 
-## 0-B. 🏷 개념 태그 (v1.4) — ⚠️ **실행 대기**
+## 0-B. 🏷 개념 태그 (v1.4) — ✅ 실행 완료 (2026-08-17)
 
 후보함 행에 손으로 붙이는 주제어입니다. 제목에서 기계적으로 뽑은 낱말보다 정확해서,
 `🔎 관련` 탐색이 **태그가 있으면 태그를 먼저** 검색어로 씁니다.
@@ -112,7 +112,7 @@ alter table public.yt_videos drop column if exists target_group;
 
 ---
 
-## 0-C. 💬 댓글 수집 (v1.5) — ⚠️ **실행 대기**
+## 0-C. 💬 댓글 수집 (v1.5) — ✅ 실행 완료 (2026-08-17 · 50개 수집 확인)
 
 후보로 담은 영상(`pick_level >= 1`)의 **상위 댓글만** 모읍니다. 목록 전체의 댓글을 받으면
 할당량이 남아나지 않습니다. `commentThreads.list` 는 호출당 1유닛이라 **영상 1건 = 1유닛**입니다.
@@ -161,7 +161,7 @@ drop table if exists public.yt_comments;
 
 ---
 
-## 0-D. ⚡ 할당량 합산 장부 (v1.6) — ⚠️ **실행 대기**
+## 0-D. ⚡ 할당량 합산 장부 (v1.6) — ✅ 실행 완료 (2026-08-17)
 
 같은 API 키를 **Railway·집·학교**에서 같이 씁니다. 인스턴스마다 자기 파일
 (`logs/units-*.json`)만 보면 "오늘 얼마 썼나" 가 늘 실제보다 적게 나옵니다.
@@ -206,7 +206,7 @@ drop table if exists public.yt_quota_log;
 
 ---
 
-## 0-E. ⚙️ 설정 행 허용 (v1.7) — ⚠️ **실행 대기 · 이거 없으면 토글이 안 먹습니다**
+## 0-E. ⚙️ 설정 행 허용 (v1.7) — ✅ 실행 완료 (2026-08-17 · 급상승 토글 저장 확인)
 
 화면의 켜기/끄기 설정(급상승 수집, 새 광맥 자동 탐사)과 '백카탈로그 완료' 표시는
 `yt_watches` 에 `type='setting'` 행으로 저장합니다. 그런데 **초기 스키마의 체크 제약에
@@ -228,7 +228,7 @@ alter table public.yt_watches add constraint yt_watches_type_check
 
 ---
 
-## 0-F. 🤖 자동 예심 (v1.8) — ⚠️ **실행 대기**
+## 0-F. 🤖 자동 예심 (v1.8) — ✅ 실행 완료 (2026-08-17 · 5건 표시)
 
 사람이 발굴 목록을 훑으며 하던 1차 스캔을 기계가 먼저 합니다.
 통과분은 후보함의 **🤖 예심 통과(검토 대기)** 칸에 쌓이고, 사람은 승격/제외만 누릅니다.
@@ -267,6 +267,30 @@ alter table public.yt_videos drop column if exists auto_picked;
 alter table public.yt_videos drop column if exists auto_picked_at;
 alter table public.yt_videos drop column if exists excluded;
 ```
+
+---
+
+## 0-G. 🤔 예심 킵(보류) (v1.9) — ⚠️ **실행 대기**
+
+예심 통과분을 그 자리에서 승격/제외만 고르기는 어렵습니다. **나중에 다시 볼 것**을
+따로 모아 두는 칸입니다. 제외(`excluded`)와 달리 킵은 되돌릴 수 있습니다.
+
+```sql
+alter table public.yt_videos add column if not exists kept boolean not null default false;
+
+create index if not exists yt_videos_kept_idx
+  on public.yt_videos (kept, pick_level);
+```
+
+| 버튼 | 하는 일 |
+|---|---|
+| `⭐ 승격` | `pick_level = 1` — 내 후보로 |
+| `🤔 킵` | `kept = true` — 검토 대기에서 빠지고 **🤔 킵 칸**으로. `auto_picked` 는 그대로 |
+| `↩ 대기로` | 킵 칸에서 되돌리기 (`kept = false`) |
+| `✕ 제외` | `excluded = true` · `auto_picked/kept = false` — 다시 올라오지 않음 |
+
+- 실행 전에는 킵 버튼이 **503** 으로 안내하고 나머지(승격·제외)는 그대로 동작합니다.
+- 발굴 탭 배지와 `검토 대기 N건` 은 **킵을 뺀 수**입니다.
 
 ---
 

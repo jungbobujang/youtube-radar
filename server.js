@@ -411,6 +411,34 @@ async function saveVideos(items, source, cfg, opts = {}) {
   return items.length
 }
 
+// ---------------------------------------------------------------- 민감 주제
+//
+// 교사 신분이라 D 채널(본명·얼굴)에는 올리기 어려운 주제들이다. 걸러 버리는 게 아니라
+// 🅐 전용으로 따로 모아 두고, 용도 태그도 A 로 미리 잡아 준다.
+//
+// 낱말이 제목에 그대로 들어 있으면 걸린다(부분 일치). 편집은 이 배열만 고치면 된다.
+// - 너무 넓게 잡으면 "AI 반도체 전쟁" 처럼 비유까지 걸린다. 그래도 A 로 분류될 뿐
+//   목록에서 사라지지는 않으니, 애매하면 넣어 두는 편이 안전하다.
+// - 반대로 특정 표현만 빼고 싶으면 그 줄만 지우면 된다.
+const SENSITIVE_KEYWORDS = [
+  // 정치 일반
+  '정치', '정당', '대통령', '국회', '의원', '선거', '탄핵', '진보', '보수', '좌파', '우파',
+  // 집회·충돌
+  '시위', '집회', '내란', '계엄', '쿠데타', '혁명', '천안문', '전쟁', '분쟁', '학살',
+  // 혐오·갈등
+  '혐오', '젠더', '페미', '남녀갈등', '차별', '인종',
+  // 종교
+  '종교', '기독교', '이슬람', '불교', '천주교', '이단', '사이비',
+  // 국가 감정
+  '반중', '반일', '친중', '친일', '중국인', '일본인', '조선족', '식민', '위안부', '독도'
+]
+
+// 제목에 걸린 낱말들. 화면에는 앞의 몇 개만 보여 준다.
+function sensitiveHits(title) {
+  const t = String(title ?? '')
+  return SENSITIVE_KEYWORDS.filter((w) => t.includes(w))
+}
+
 // ---------------------------------------------------------------- 발굴 지표
 //
 // 발굴점수 = log(1+배율) × log(1+침투력) × (1 + 참여율/ENGAGE_DIVISOR)
@@ -618,6 +646,8 @@ function deriveMetrics(v, channel, trend) {
   // 활력은 자기 과거와의 비교라 채널 크기와 무관하다. 체급 보정이 필요 없다.
   // 표본이 모자라면(어느 한쪽 구간 영상 5개 미만) ratio 가 null 이고 아무것도 표시하지 않는다.
   return {
+    // 민감 주제는 목록마다 따로 계산할 것 없이 지표를 붙일 때 같이 본다
+    sensitive: sensitiveHits(v.title),
     reach: reach == null ? null : Number(reach.toFixed(2)),
     engage: Number(engage.toFixed(2)),
     vitality: vitality == null ? null : Number(vitality.toFixed(2)),
@@ -1780,6 +1810,19 @@ async function auditionColumnsReady() {
   return auditionReady
 }
 
+// 킵(보류)은 나중에 추가된 컬럼이라 따로 본다 (0-F 만 실행하고 0-G 는 아직일 수 있다)
+let keptReady = null
+
+async function keptColumnReady() {
+  if (keptReady !== null) return keptReady
+  const { error } = await supabase.from('yt_videos').select('kept').limit(1)
+  keptReady = !error
+  if (!keptReady) {
+    console.warn(`[예심] 킵 컬럼이 아직 없습니다 (TODO-SQL.md 0-G 참고): ${error.message}`)
+  }
+  return keptReady
+}
+
 // 체급별 참여율 상위 ENGAGE_TOP_PCT 경계값
 function engageCutByTier(rows) {
   const byTier = new Map()
@@ -2538,10 +2581,19 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       })
     }
 
-    const { video_id, level, target_group, concept_tags, excluded } = req.body ?? {}
+    const { video_id, level, target_group, concept_tags, excluded, kept } = req.body ?? {}
     if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
 
     const patch = {}
+    // 🤔 킵 — 검토 대기에서 빼되 버리지는 않는다. 킵 칸에서 언제든 승격·제외할 수 있다.
+    if (kept !== undefined) {
+      if (!(await keptColumnReady())) {
+        return res.status(503).json({
+          error: '킵 컬럼이 아직 없어요. TODO-SQL.md 0-G 의 SQL 을 먼저 실행해 주세요'
+        })
+      }
+      patch.kept = !!kept
+    }
     // 예심 통과분 제외 — 다시 올라오지 않게 표시하고 대기 칸에서 뺀다
     if (excluded !== undefined) {
       if (!(await auditionColumnsReady())) {
@@ -2551,6 +2603,7 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       }
       patch.excluded = !!excluded
       patch.auto_picked = false
+      if (await keptColumnReady()) patch.kept = false
     }
     if (concept_tags !== undefined) {
       if (!(await conceptColumnReady())) {
@@ -2578,12 +2631,15 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       return res.status(400).json({ error: '바꿀 내용이 없어요' })
     }
 
-    // 처음 담을 때 용도가 비어 있으면 채널 그룹에서 추정해 채운다
+    // 처음 담을 때 용도가 비어 있으면 채워 준다.
+    // 민감 주제면 채널 그룹 추정보다 우선해서 A(부계정)로 잡는다.
     if (patch.pick_level >= 1 && patch.target_group === undefined) {
       const { data: cur } = await supabase
-        .from('yt_videos').select('channel_id, target_group').eq('video_id', video_id).single()
+        .from('yt_videos').select('channel_id, target_group, title').eq('video_id', video_id).single()
       if (cur && !cur.target_group) {
-        const guess = (await channelTargets()).get(cur.channel_id)
+        const guess = sensitiveHits(cur.title).length > 0
+          ? 'A'
+          : (await channelTargets()).get(cur.channel_id)
         if (guess) patch.target_group = guess
       }
     }
@@ -2689,30 +2745,44 @@ app.get('/api/picks', requireAuth, async (req, res) => {
 
     // 🤖 예심 통과 — 기계가 걸러 놓고 사람 검토를 기다리는 것 (auto_picked & 아직 안 담김)
     let auto = []
+    let sensitive = []
+    let kept = []
     const auditionOn = await auditionColumnsReady()
+    const keptOn = await keptColumnReady()
+
     if (auditionOn) {
-      const { data: pending } = await supabase
+      let q = supabase
         .from('yt_videos').select('*')
-        .eq('auto_picked', true)
         .eq('excluded', false) // not null default false 라 이 비교로 충분하다
         .or('pick_level.is.null,pick_level.eq.0')
         .order('auto_picked_at', { ascending: false })
-        .limit(100)
+        .limit(150)
+      // 킵도 예심에서 나온 것이라 auto_picked 는 그대로 두고 kept 로만 갈라 놓는다
+      q = keptOn ? q.or('auto_picked.eq.true,kept.eq.true') : q.eq('auto_picked', true)
 
-      auto = rescoreByTier((pending ?? []).map((v) => ({
+      const { data: pending } = await q
+      const rows = rescoreByTier((pending ?? []).map((v) => ({
         ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id))
       })))
-      attachGrades(auto)
-      attachEvergreen(auto, await velocityMap(auto.map((v) => v.video_id)))
-      await attachSaturation(auto)
-      auto.sort((a, b) => b.dig_score - a.dig_score)
+      attachGrades(rows)
+      attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
+      await attachSaturation(rows)
+      rows.sort((a, b) => b.dig_score - a.dig_score)
+
+      // 🤔 킵 → 🅐 전용(민감 주제) → 일반 검토 대기 순으로 갈라 담는다
+      for (const v of rows) {
+        if (keptOn && v.kept) kept.push(v)
+        else if (v.sensitive?.length > 0) sensitive.push(v)
+        else auto.push(v)
+      }
     }
 
     // 개념 태그 컬럼이 없으면 화면에서 입력칸 자체를 감춘다 (저장할 때 503 을 보느니)
     res.json({
-      rows, auto, summary, ready,
+      rows, auto, sensitive, kept, summary, ready,
       concept_ready: await conceptColumnReady(),
-      audition_ready: auditionOn
+      audition_ready: auditionOn,
+      kept_ready: keptOn
     })
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -3249,10 +3319,13 @@ app.get('/api/status', requireAuth, async (req, res) => {
     // 🤖 예심 통과 후 검토를 기다리는 건수 (발굴 탭 배지에 쓴다)
     let auditionPending = 0
     if (await auditionColumnsReady()) {
-      const { count: n } = await supabase
+      let q = supabase
         .from('yt_videos').select('video_id', { count: 'exact', head: true })
         .eq('auto_picked', true).eq('excluded', false)
         .or('pick_level.is.null,pick_level.eq.0')
+      // 킵해 둔 것은 '검토 대기' 가 아니다
+      if (await keptColumnReady()) q = q.eq('kept', false)
+      const { count: n } = await q
       auditionPending = n ?? 0
     }
 
