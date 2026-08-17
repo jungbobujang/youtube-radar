@@ -494,7 +494,7 @@
 <script>
 const $ = (s) => document.querySelector(s)
 let tab = 'dig'
-let settings = { trendingOn: false, channels: [], groups: [] }
+let settings = { trendingOn: false, prospectOn: false, channels: [], groups: [] }
 let digPeriod = 'all'
 let digChannel = 'all'
 let digSort = 'dig'
@@ -1441,6 +1441,18 @@ async function render() {
       </label>
       <p class="muted">채널 백카탈로그 발굴이 주 전략이라 기본값은 off 입니다.</p>
 
+      <h3 class="sec">⛏ 새 광맥 자동 탐사</h3>
+      <label class="cat">
+        <input type="checkbox" id="s-prospect" ${settings.prospectOn ? 'checked' : ''}>
+        정규 수집 때 키워드 검색도 함께 — 기본은 꺼짐
+      </label>
+      <p class="muted">
+        키워드 검색은 <b>1건당 100유닛</b>이라 하루 2회 수집에서 가장 많이 먹습니다.
+        평소엔 꺼 두고 아래 버튼으로 필요할 때만 돌리세요.
+        <button class="btn btn-sm" id="prospect-now">🔎 지금 탐사</button>
+      </p>
+      <p class="err" id="prospect-err"></p>
+
       <h3 class="sec">🔍 수집 대상 <span class="muted">(할당량 소모)</span></h3>
       <div class="form">
         <select id="w-type">
@@ -1579,6 +1591,28 @@ async function render() {
       }) }
       renderTabs()
     }
+    $('#s-prospect').onchange = async (e) => {
+      settings = { ...settings, ...await api('/api/settings/prospect', {
+        method: 'POST', body: JSON.stringify({ on: e.target.checked })
+      }) }
+    }
+    $('#prospect-now').onclick = async (e) => {
+      const b = e.target
+      b.disabled = true
+      const face = b.textContent
+      b.textContent = '탐사 중...'
+      $('#prospect-err').textContent = ''
+      try {
+        const r = await api('/api/prospect', { method: 'POST' })
+        b.textContent = `✅ ${fmt(r.videos ?? 0)}건 · ${fmt(r.units ?? 0)}유닛`
+        refreshStatus()
+      } catch (err) {
+        $('#prospect-err').textContent = err.message
+        b.textContent = face
+      } finally {
+        b.disabled = false
+      }
+    }
     $('#w-add').onclick = () => add($('#w-type').value, $('#w-value').value.trim())
     $('#inc-add').onclick = () => add('include_kw', $('#inc-value').value.trim())
     $('#exc-add').onclick = () => add('exclude_kw', $('#exc-value').value.trim())
@@ -1643,6 +1677,15 @@ function unitsTip(s) {
   ].filter(Boolean).join('\n')
 }
 
+// 지금 설정으로 하루에 얼마나 쓰게 되는지. 0 인 항목은 감춘다.
+function estimateTip(e) {
+  const lines = Object.entries(e.by ?? {})
+    .filter(([, v]) => v > 0)
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${k} ${fmt(v)}`)
+  return [`정규 수집 하루 ${e.cycles_per_day}회 기준 예상치`, ...lines].join('\n')
+}
+
 async function refreshStatus() {
   const el = $('#status')
   if (!el) return
@@ -1667,6 +1710,7 @@ async function refreshStatus() {
       <span class="bar ${level ? `bar-${level}` : ''}" title="${pct}% 사용 (${esc(s.quota_date)} 태평양 기준)">
         <span style="width:${pct}%"></span>
       </span>
+      ${s.estimate ? `<span class="st" title="${esc(estimateTip(s.estimate))}">📐 예상 <b>${fmt(s.estimate.total)}</b>유닛/일</span>` : ''}
       ${s.last_run?.aborted === 'quota'
         ? `<span class="st st-danger" title="${esc(s.quota_note ?? '')}">
              <b>할당량 초과로 중단</b> · 태평양 자정(한국 오후 4~5시경) 리셋 후 재시도</span>` : ''}

@@ -176,6 +176,14 @@ async function unitsTodayFromDb() {
 const QUOTA_NOTE = '할당량은 이 앱이 아니라 같은 API 키를 쓰는 구글 클라우드 프로젝트 전체 기준입니다. ' +
   '태평양 자정(한국 시간 오후 4~5시경)에 리셋됩니다.'
 
+// 수집은 할당량이 바닥나도 예외를 던지지 않고 사이클만 접는다(aborted='quota').
+// 그대로 200 으로 돌려주면 화면에는 '0건 수집' 처럼 보이므로 여기서 잡아 준다.
+function sentQuotaAbort(res, report) {
+  if (report?.aborted !== 'quota') return false
+  res.status(429).json({ error: `할당량이 바닥났어요. ${QUOTA_NOTE}`, quota: true, report })
+  return true
+}
+
 // 할당량 오류면 429 로, 그 밖은 500 으로. 문구에 리셋 안내를 붙인다.
 function sendYtError(res, err) {
   if (isQuotaError(err)) {
@@ -359,8 +367,11 @@ function scoreVideo(video, cfg, source) {
   return score
 }
 
+// source 는 문자열, 또는 통계만 다시 읽는 경우처럼 영상마다 원래 출처를 지켜야 할 때
+// video_id -> source 인 Map 을 준다 (출처가 바뀌면 점수까지 따라 바뀐다).
 async function saveVideos(items, source, cfg, opts = {}) {
   if (items.length === 0) return 0
+  const sourceOf = (id) => (source instanceof Map ? (source.get(id) ?? 'refresh') : source)
 
   const videoRows = items.map((v) => ({
     video_id: v.id,
@@ -374,8 +385,8 @@ async function saveVideos(items, source, cfg, opts = {}) {
     like_count: Number(v.statistics?.likeCount ?? 0),
     comment_count: Number(v.statistics?.commentCount ?? 0),
     duration_sec: parseDuration(v.contentDetails?.duration),
-    score: scoreVideo(v, cfg, source),
-    source
+    score: scoreVideo(v, cfg, sourceOf(v.id)),
+    source: sourceOf(v.id)
   }))
 
   // PostgREST 의 upsert 는 페이로드에 없는 컬럼을 기본값으로 되돌린다.
@@ -892,21 +903,63 @@ async function channelMap() {
   return new Map((data ?? []).map((c) => [c.channel_id, c]))
 }
 
+// ---------------------------------------------------------------- 수집 주기·갱신 정책
+//
+// 할당량 절약 모드. 정규 수집은 하루 2회만 돌고, 통계(스냅샷)는 영상 성격별로
+// 갱신 주기를 달리한다. 상수는 전부 여기서 조절한다.
+const COLLECT_CRON = '0 6,21 * * *'  // 하루 2회 — 한국시간 06:00 / 21:00
+const COLLECT_TZ = 'Asia/Seoul'      // 배포지(Railway)가 UTC 라도 한국 기준으로 돈다
+const BOOT_COLLECT_GAP_H = 6         // 재시작 직후 수집은 마지막 수집이 이만큼 지났을 때만
+
+// 통계 갱신 차등 — 오래된 영상까지 매번 다시 읽을 이유가 없다 (50개당 1유닛)
+const REFRESH = {
+  FRESH_DAYS: 30,    // 게시 30일 이내: 매 수집마다
+  PICK_HOURS: 24,    // ⭐ 후보로 담은 것: 하루 1회
+  BACKLOG_DAYS: 7,   // 그 밖의 백카탈로그: 주 1회
+  UNIT_BUDGET: 20,   // 1회 수집에서 통계 갱신에 쓸 유닛 상한
+  CANDIDATES: 400    // 한 번에 살펴볼 후보 수 (구간별)
+}
+
 // ---------------------------------------------------------------- 백카탈로그
 
 const BACKFILL_MAX_PER_CHANNEL = 500 // 채널당 최대 보관 영상 수
 const BACKFILL_UNIT_BUDGET = 260     // 1회 수집에서 백카탈로그에 쓸 유닛 상한
 const PAGE = 50                      // playlistItems 한 페이지
 
+// 업로드 목록 끝까지 훑은 채널은 더 팔 게 없다. 순회에서 빼려고 표시해 둔다.
+// 컬럼을 늘리지 않으려고 설정 행(type='setting')을 그대로 쓴다.
+const backfillDoneKey = (channelId) => `backfill_done:${channelId}`
+
+async function backfillDoneSet() {
+  const { data } = await supabase
+    .from('yt_watches').select('value').eq('type', 'setting').like('value', 'backfill_done:%')
+  return new Set((data ?? []).map((r) => String(r.value).slice('backfill_done:'.length)))
+}
+
+async function markBackfillDone(channelId, label) {
+  const { error } = await supabase.from('yt_watches').insert({
+    type: 'setting', value: backfillDoneKey(channelId),
+    label: `백카탈로그 완료: ${label ?? channelId}`, active: true
+  })
+  if (error && !/duplicate/i.test(error.message)) {
+    // type 제약에 'setting' 이 없으면 여기서 막힌다 (TODO-SQL.md 0-E).
+    // 표시를 못 해도 수집 자체는 계속 돈다 — 다음 회차에 그 채널을 또 훑을 뿐이다.
+    console.warn(`[collect] 백카탈로그 완료 표시 실패: ${error.message}`)
+  }
+}
+
 // 이미 저장된 영상 수가 적은 채널부터 돈다. 별도 커서 컬럼 없이 순환이 된다.
+// 상한을 채웠거나 끝까지 훑은 채널은 done 으로 표시해 아예 돌지 않는다.
 async function channelBacklogState(channels) {
+  const done = await backfillDoneSet()
   const out = []
   for (const w of channels) {
     const { count } = await supabase
       .from('yt_videos')
       .select('video_id', { count: 'exact', head: true })
       .eq('channel_id', w.value)
-    out.push({ watch: w, stored: count ?? 0 })
+    const stored = count ?? 0
+    out.push({ watch: w, stored, done: done.has(w.value) || stored >= BACKFILL_MAX_PER_CHANNEL })
   }
   return out.sort((a, b) => a.stored - b.stored)
 }
@@ -917,6 +970,7 @@ async function backfillChannel(w, cfg, budget) {
   let pageToken
   let seen = 0
   let saved = 0
+  let complete = false // 업로드 목록을 끝까지 봤는가
 
   while (seen < BACKFILL_MAX_PER_CHANNEL && used + 2 <= budget) {
     const playlistId = await uploadsPlaylistId(w)
@@ -930,7 +984,7 @@ async function backfillChannel(w, cfg, budget) {
 
     const ids = (list.items ?? []).map((i) => i.contentDetails?.videoId).filter(Boolean)
     seen += ids.length
-    if (ids.length === 0) break
+    if (ids.length === 0) { complete = true; break }
 
     // 이미 있는 영상은 상세를 다시 부르지 않는다 (스냅샷은 신작 수집에서 계속 쌓인다)
     const { data: known } = await supabase
@@ -945,10 +999,10 @@ async function backfillChannel(w, cfg, budget) {
     }
 
     pageToken = list.nextPageToken
-    if (!pageToken) break
+    if (!pageToken) { complete = true; break }
   }
 
-  return { used, saved, seen }
+  return { used, saved, seen, complete }
 }
 
 const DURATION_UNIT_BUDGET = 20 // 1회 수집에서 재생시간 백필에 쓸 유닛 (50개당 1유닛)
@@ -975,6 +1029,86 @@ async function backfillDurations(cfg) {
     if (data.length < 50) break
   }
   return { used, filled }
+}
+
+// ---------------------------------------------------------------- 통계 갱신 (차등)
+//
+// 예전에는 감시 채널의 최신 25개만 매 수집마다 다시 읽었다. 그러면 후보로 담아 둔
+// 과거 영상은 스냅샷이 1개에서 늘지 않아 '측정 중' 에서 벗어나지 못한다.
+// 그렇다고 전부 매번 읽으면 유닛이 감당이 안 된다. 그래서 성격별로 주기를 나눈다.
+
+let backlogCursor = 0 // 백카탈로그를 조금씩 돌아가며 훑기 위한 위치 (재시작하면 처음부터)
+
+// 마지막 스냅샷이 maxAgeMs 보다 오래된 영상만 남긴다.
+// video_velocity 함수가 영상별 최신 스냅샷 시각을 한 번에 준다.
+async function dueForRefresh(ids, maxAgeMs) {
+  if (ids.length === 0) return []
+  const { data, error } = await supabase.rpc('video_velocity', { ids, window_days: 1 })
+  if (error) {
+    console.warn(`[collect] 갱신 대상 판정 실패(함수 없음?): ${error.message}`)
+    return ids // 판단할 수 없으면 그냥 대상으로 본다
+  }
+  const latest = new Map((data ?? []).map((r) => [r.video_id, r.latest_at]))
+  return ids.filter((id) => {
+    const at = latest.get(id)
+    return !at || Date.now() - new Date(at).getTime() >= maxAgeMs
+  })
+}
+
+const idsOf = (rows) => (rows ?? []).map((r) => r.video_id)
+
+async function refreshVideoStats(cfg) {
+  const out = { videos: 0, used: 0, fresh: 0, picks: 0, backlog: 0 }
+  const freshSince = new Date(Date.now() - REFRESH.FRESH_DAYS * DAY).toISOString()
+
+  // 1) 신작 — 매 수집마다 (증가량 추이가 여기서 나온다)
+  const { data: freshRows } = await supabase
+    .from('yt_videos').select('video_id')
+    .gte('published_at', freshSince)
+    .order('published_at', { ascending: false }).limit(REFRESH.CANDIDATES)
+
+  // 2) ⭐ 후보 — 하루 1회
+  let pickRows = []
+  if (await pickColumnsReady()) {
+    const { data } = await supabase
+      .from('yt_videos').select('video_id').gte('pick_level', 1).limit(REFRESH.CANDIDATES)
+    pickRows = data ?? []
+  }
+
+  // 3) 그 밖의 백카탈로그 — 주 1회. 매번 앞에서부터 보면 뒤쪽은 영영 안 도니 커서를 민다.
+  const { data: backlogRows } = await supabase
+    .from('yt_videos').select('video_id')
+    .lt('published_at', freshSince)
+    .order('first_seen_at', { ascending: true })
+    .range(backlogCursor, backlogCursor + REFRESH.CANDIDATES - 1)
+  if ((backlogRows ?? []).length < REFRESH.CANDIDATES) backlogCursor = 0
+  else backlogCursor += REFRESH.CANDIDATES
+
+  const [fresh, picks, backlog] = await Promise.all([
+    dueForRefresh(idsOf(freshRows), 0),
+    dueForRefresh(idsOf(pickRows), REFRESH.PICK_HOURS * 3600e3),
+    dueForRefresh(idsOf(backlogRows), REFRESH.BACKLOG_DAYS * DAY)
+  ])
+  out.fresh = fresh.length
+  out.picks = picks.length
+  out.backlog = backlog.length
+
+  // 급한 순서대로 붙이고 중복을 걷어낸 뒤, 예산만큼만 읽는다
+  const queue = [...new Set([...fresh, ...picks, ...backlog])].slice(0, REFRESH.UNIT_BUDGET * 50)
+  if (queue.length === 0) return out
+
+  // 통계만 다시 읽는 것이므로 원래 출처(source)를 그대로 지켜 준다
+  const { data: known } = await supabase
+    .from('yt_videos').select('video_id, source').in('video_id', queue)
+  const sources = new Map((known ?? []).map((r) => [r.video_id, r.source ?? 'refresh']))
+
+  for (let i = 0; i < queue.length && out.used < REFRESH.UNIT_BUDGET; i += 50) {
+    const batch = queue.slice(i, i + 50)
+    const details = await fetchVideoDetails(batch)
+    out.used += 1
+    out.videos += await saveVideos(details, sources, cfg)
+  }
+  return out
 }
 
 // 채널별 조회수 중앙값 대비 배율.
@@ -1017,12 +1151,15 @@ async function readSettings() {
   const { data } = await supabase
     .from('yt_watches').select('value').eq('type', 'setting').eq('active', true)
   const flags = new Set((data ?? []).map((r) => r.value))
-  return { trendingOn: flags.has('trending_on') } // 기본 off
+  return {
+    trendingOn: flags.has('trending_on'), // 기본 off
+    prospectOn: flags.has('prospect_on')  // 새 광맥 탐사(키워드 검색) — 기본 off
+  }
 }
 
 // 한 단계가 실패해도 다음 단계는 계속한다.
 // 다만 할당량이 바닥나면 뒤 단계도 전부 같은 오류를 받을 뿐이라 그 자리에서 접는다.
-async function runCycle(report) {
+async function runCycle(report, opts = {}) {
   // 채점에 쓸 설정을 먼저 읽는다 (급상승 카테고리 필터가 여기 달려 있다)
   let watches = []
   try {
@@ -1042,8 +1179,12 @@ async function runCycle(report) {
 
   const settings = await readSettings()
 
+  // '지금 탐사' 는 키워드 검색만 돌린다. 채널·백카탈로그까지 같이 돌리면
+  // 버튼 한 번에 정규 수집 한 사이클을 통째로 더 쓰게 된다.
+  const only = opts.only ?? null
+
   // a. 인기 급상승 — 기본은 꺼져 있다 (백카탈로그 발굴로 전략 전환)
-  if (settings.trendingOn) {
+  if (settings.trendingOn && !only) {
     try {
       const data = await ytGet('videos', {
         part: 'snippet,statistics',
@@ -1062,12 +1203,18 @@ async function runCycle(report) {
 
   for (const w of watches) {
     if (w.type !== 'keyword' && w.type !== 'channel') continue // 나머지는 채점용 설정
+    if (only === 'prospect' && w.type !== 'keyword') continue
     // 한 감시 대상이 실패해도 나머지는 계속한다
     try {
       let ids = []
 
       if (w.type === 'keyword') {
-        // 키워드는 검색 말고 방법이 없다 (search.list = 100 유닛)
+        // 새 광맥 탐사 — 검색 말고 방법이 없어 1건당 100유닛이다.
+        // 자동 사이클에서는 기본으로 끄고, 감시 관리 토글이나 '지금 탐사' 버튼으로만 돈다.
+        if (!settings.prospectOn && !opts.prospect) {
+          report.prospect_skipped = (report.prospect_skipped ?? 0) + 1
+          continue
+        }
         const found = await ytGet('search', {
           part: 'snippet',
           type: 'video',
@@ -1105,19 +1252,21 @@ async function runCycle(report) {
   }
 
   // c. 백카탈로그 — 저장량이 적은 채널부터 유닛 예산 안에서 과거를 파고든다
-  const channels = watches.filter((w) => w.type === 'channel')
+  const channels = only ? [] : watches.filter((w) => w.type === 'channel')
   if (channels.length > 0) {
     let budget = BACKFILL_UNIT_BUDGET
     report.backfill = {}
     try {
-      for (const { watch, stored } of await channelBacklogState(channels)) {
+      for (const { watch, done } of await channelBacklogState(channels)) {
         if (budget < 3) break
-        if (stored >= BACKFILL_MAX_PER_CHANNEL) continue
+        // 상한을 채웠거나 업로드 목록을 끝까지 훑은 채널은 더 팔 게 없다
+        if (done) { report.backfill_done = (report.backfill_done ?? 0) + 1; continue }
         try {
           const r = await backfillChannel(watch, cfg, budget)
           budget -= r.used
           report.units += r.used
           if (r.saved > 0) report.backfill[watch.label || watch.value] = r.saved
+          if (r.complete) await markBackfillDone(watch.value, watch.label)
         } catch (err) {
           if (noteError(report, `백카탈로그 ${watch.label || watch.value}`, err)) return
         }
@@ -1127,22 +1276,33 @@ async function runCycle(report) {
     }
   }
 
-  // c-2. 재생시간이 비어 있는 과거 영상 채우기
-  try {
-    const r = await backfillDurations(cfg)
-    report.durations = r.filled
-    report.units += r.used
-  } catch (err) {
-    if (noteError(report, '재생시간 백필', err)) return
-  }
+  // c-1. 통계 갱신 — 신작은 매번, ⭐ 후보는 하루 1회, 나머지 백카탈로그는 주 1회
+  if (!only) {
+    try {
+      const r = await refreshVideoStats(cfg)
+      report.refreshed = r
+      report.units += r.used
+    } catch (err) {
+      if (noteError(report, '통계 갱신', err)) return
+    }
 
-  // d. 채널 정보(구독자·최근 중앙값) — 하루 1회
-  try {
-    const r = await refreshChannels()
-    report.channels = r.updated
-    report.units += r.units
-  } catch (err) {
-    if (noteError(report, '채널 정보', err)) return
+    // c-2. 재생시간이 비어 있는 과거 영상 채우기
+    try {
+      const r = await backfillDurations(cfg)
+      report.durations = r.filled
+      report.units += r.used
+    } catch (err) {
+      if (noteError(report, '재생시간 백필', err)) return
+    }
+
+    // d. 채널 정보(구독자·최근 중앙값) — 하루 1회
+    try {
+      const r = await refreshChannels()
+      report.channels = r.updated
+      report.units += r.units
+    } catch (err) {
+      if (noteError(report, '채널 정보', err)) return
+    }
   }
 
   // e. 채널별 중앙값 대비 배율 갱신
@@ -1154,7 +1314,8 @@ async function runCycle(report) {
 }
 
 // 수동 수집과 cron 이 겹치면 같은 일을 두 번 하며 할당량만 태운다. 한 번에 하나만 돈다.
-async function collect() {
+// opts.prospect 를 주면 이번 회차만 키워드 탐사(100유닛/건)를 함께 돈다.
+async function collect(opts = {}) {
   if (collecting) {
     console.warn('[collect] 이미 실행 중입니다. 이번 호출은 건너뜁니다')
     return lastRun
@@ -1163,10 +1324,10 @@ async function collect() {
 
   const started = Date.now()
   const report = { trending: 0, watches: 0, videos: 0, byWatch: {}, units: 0, errors: [] }
-  console.log('[collect] 시작')
+  console.log(`[collect] 시작${opts.prospect ? ' (탐사 포함)' : ''}`)
 
   try {
-    await runCycle(report)
+    await runCycle(report, opts)
   } catch (err) {
     // 예상 못 한 오류까지 여기서 삼킨다. 사이클만 접히고 서버와 cron 은 그대로 산다.
     noteError(report, '수집', err)
@@ -1731,22 +1892,63 @@ app.post('/api/watch-groups', requireAuth, async (req, res) => {
   }
 })
 
+// 설정 토글은 전부 같은 모양이다 (yt_watches 의 setting 행 하나)
+const SETTING_FLAGS = {
+  trending: { value: 'trending_on', label: '급상승 수집' },
+  prospect: { value: 'prospect_on', label: '새 광맥 자동 탐사' }
+}
+
+// 설정 행은 yt_watches 에 type='setting' 으로 들어간다. 그런데 초기 스키마의
+// type 체크 제약에 'setting' 이 빠져 있어 저장이 막힌다(그래서 급상승 토글도 안 먹었다).
+// 제약을 넓히는 SQL 은 TODO-SQL.md 0-E 에 있다.
+const SETTING_BLOCKED = '설정을 저장할 수 없어요. TODO-SQL.md 0-E 의 SQL(yt_watches ' +
+  'type 제약에 setting 추가)을 먼저 실행해 주세요'
+
+const isTypeCheckError = (err) => /type_check/i.test(err?.message ?? '')
+
+async function toggleSetting(name, on) {
+  const flag = SETTING_FLAGS[name]
+  if (!flag) throw new Error('알 수 없는 설정이에요')
+  if (on) {
+    const { error } = await supabase
+      .from('yt_watches')
+      .insert({ type: 'setting', value: flag.value, label: flag.label, active: true })
+    if (error) throw isTypeCheckError(error) ? new Error(SETTING_BLOCKED) : error
+  } else {
+    const { error } = await supabase
+      .from('yt_watches').delete().eq('type', 'setting').eq('value', flag.value)
+    if (error) throw error
+  }
+  return readSettings()
+}
+
 app.post('/api/settings/trending', requireAuth, async (req, res) => {
   try {
-    const { on } = req.body ?? {}
-    if (on) {
-      const { error } = await supabase
-        .from('yt_watches')
-        .insert({ type: 'setting', value: 'trending_on', label: '급상승 수집', active: true })
-      if (error) throw error
-    } else {
-      const { error } = await supabase
-        .from('yt_watches').delete().eq('type', 'setting').eq('value', 'trending_on')
-      if (error) throw error
-    }
-    res.json(await readSettings())
+    res.json(await toggleSetting('trending', req.body?.on))
   } catch (err) {
     res.status(500).json({ error: err.message })
+  }
+})
+
+// 새 광맥 탐사 자동 실행 (키워드 검색 = 1건당 100유닛). 기본 off.
+app.post('/api/settings/prospect', requireAuth, async (req, res) => {
+  try {
+    res.json(await toggleSetting('prospect', req.body?.on))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 🔎 지금 탐사 — 키워드 감시를 이번 한 번만 돌린다 (자동이 꺼져 있어도)
+app.post('/api/prospect', requireAuth, async (req, res) => {
+  try {
+    if (collecting) {
+      return res.status(409).json({ error: '이미 수집이 돌고 있어요. 끝나면 화면이 갱신됩니다' })
+    }
+    const report = await collect({ prospect: true, only: 'prospect' })
+    if (!sentQuotaAbort(res, report)) res.json(report)
+  } catch (err) {
+    sendYtError(res, err)
   }
 })
 
@@ -2462,6 +2664,56 @@ app.delete('/api/watches/:id', requireAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
+// ---------------------------------------------------------------- 예상 사용량
+//
+// 지금 설정으로 하루에 몇 유닛을 쓰게 되는지 미리 보여 준다. 30분 캐시.
+const CYCLES_PER_DAY = (COLLECT_CRON.split(' ')[1] ?? '').split(',').length || 1
+let estimateCache = { at: 0, value: null }
+
+async function estimateDailyUnits() {
+  if (estimateCache.value && Date.now() - estimateCache.at < 30 * 60e3) return estimateCache.value
+
+  const settings = await readSettings()
+  const { data: watches } = await supabase
+    .from('yt_watches').select('type, value').eq('active', true)
+  const channels = (watches ?? []).filter((w) => w.type === 'channel')
+  const keywords = (watches ?? []).filter((w) => w.type === 'keyword')
+
+  // 백카탈로그가 남은 채널이 하나도 없으면 그 예산은 안 쓴다
+  const done = await backfillDoneSet()
+  const digging = channels.filter((c) => !done.has(c.value)).length
+
+  const by = {
+    // 채널 최신 업로드: playlistItems 1 + videos.list 1
+    '채널 신작': channels.length * 2 * CYCLES_PER_DAY,
+    '통계 갱신': REFRESH.UNIT_BUDGET * CYCLES_PER_DAY,
+    '재생시간 백필': DURATION_UNIT_BUDGET * CYCLES_PER_DAY,
+    '백카탈로그': digging > 0 ? BACKFILL_UNIT_BUDGET * CYCLES_PER_DAY : 0,
+    '채널 정보': Math.ceil(channels.length / 50), // 하루 1회
+    '급상승': settings.trendingOn ? CYCLES_PER_DAY : 0,
+    '새 광맥 탐사': settings.prospectOn ? keywords.length * 101 * CYCLES_PER_DAY : 0
+  }
+
+  // 댓글은 주 1회라 하루치로 나눠 본다
+  if (await commentsTableReady()) {
+    let picks = 0
+    if (await pickColumnsReady()) {
+      const { count } = await supabase
+        .from('yt_videos').select('video_id', { count: 'exact', head: true }).gte('pick_level', 1)
+      picks = count ?? 0
+    }
+    by['댓글 수집'] = Math.ceil(Math.min(picks, COMMENT_WEEKLY_CAP) / 7)
+  }
+
+  const value = {
+    total: Object.values(by).reduce((a, b) => a + b, 0),
+    by,
+    cycles_per_day: CYCLES_PER_DAY
+  }
+  estimateCache = { at: Date.now(), value }
+  return value
+}
+
 // 상태바 — 마지막 수집·총 영상 수·오늘 쓴 할당량
 app.get('/api/status', requireAuth, async (req, res) => {
   try {
@@ -2480,6 +2732,7 @@ app.get('/api/status', requireAuth, async (req, res) => {
       // 댓글 수집은 영상 1건당 1유닛이라 얼마나 먹었는지 따로 보인다
       comment_units_today: Number(by?.comments) || 0,
       quota_note: QUOTA_NOTE,
+      estimate: await estimateDailyUnits(),
       last_run: lastRun && {
         at: lastRun.at, ms: lastRun.ms, videos: lastRun.videos,
         units: lastRun.units, errors: lastRun.errors?.length ?? 0, aborted: lastRun.aborted ?? null
@@ -2509,7 +2762,8 @@ app.post('/api/collect', requireAuth, async (req, res) => {
     if (collecting) {
       return res.status(409).json({ error: '이미 수집이 돌고 있어요. 끝나면 화면이 갱신됩니다' })
     }
-    res.json(await collect())
+    const report = await collect()
+    if (!sentQuotaAbort(res, report)) res.json(report)
   } catch (err) {
     sendYtError(res, err)
   }
@@ -2517,17 +2771,38 @@ app.post('/api/collect', requireAuth, async (req, res) => {
 
 app.use(express.static(path.join(__dirname, 'public')))
 
+// 재시작할 때마다 수집을 돌리면 배포 한 번에 한 사이클씩 태운다.
+// 다른 인스턴스가 방금 돌았는지 할당량 장부로 확인하고, 최근이면 건너뛴다.
+async function shouldCollectOnBoot() {
+  if (!(await quotaTableReady())) return true // 장부가 없으면 판단할 수 없다
+  const since = new Date(Date.now() - BOOT_COLLECT_GAP_H * 3600e3).toISOString()
+  const { data, error } = await supabase
+    .from('yt_quota_log').select('id').eq('source', 'collect').gte('used_at', since).limit(1)
+  if (error) return true
+  return (data ?? []).length === 0
+}
+
 app.listen(PORT, () => {
   console.log(`[server] http://localhost:${PORT}`)
 
-  // 시작 시 1회, 이후 3시간마다
-  collect().catch((err) => console.error('[collect] 초기 실행 실패:', err.message))
-  cron.schedule('0 */3 * * *', () => {
+  // 시작 시 1회 — 단, 최근 ${BOOT_COLLECT_GAP_H}시간 안에 누가 이미 돌았으면 건너뛴다
+  shouldCollectOnBoot()
+    .then((go) => {
+      if (!go) {
+        console.log(`[collect] 최근 ${BOOT_COLLECT_GAP_H}시간 안에 수집 기록이 있어 시작 수집을 건너뜁니다`)
+        return
+      }
+      return collect()
+    })
+    .catch((err) => console.error('[collect] 초기 실행 실패:', err.message))
+
+  // 정규 수집 — 하루 2회 (한국시간 06:00 / 21:00)
+  cron.schedule(COLLECT_CRON, () => {
     collect().catch((err) => console.error('[collect] 예약 실행 실패:', err.message))
-  })
+  }, { timezone: COLLECT_TZ })
 
   // 담아 둔 영상의 댓글은 주 1회만 갱신한다 (월요일 04:00, 영상 1건당 1유닛)
   cron.schedule('0 4 * * 1', () => {
     refreshPickComments().catch((err) => console.error('[comments] 주간 갱신 실패:', err.message))
-  })
+  }, { timezone: COLLECT_TZ })
 })

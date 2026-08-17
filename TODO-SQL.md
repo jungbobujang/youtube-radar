@@ -5,8 +5,8 @@
 
 실행 전에도 서버는 죽지 않습니다. 해당 기능만 조용히 비어 있습니다.
 
-**⚠️ 실행 대기 3건 — `0-B. 개념 태그` · `0-C. 댓글 수집` · `0-D. 할당량 합산` 입니다.**
-나머지는 전부 실행 완료됐습니다.
+**⚠️ 실행 대기 4건** — `0-B. 개념 태그` · `0-C. 댓글 수집` · `0-D. 할당량 합산` ·
+`0-E. 설정 행 허용`. 나머지는 전부 실행 완료됐습니다.
 문서는 무엇을 왜 넣었는지 남겨 두려고 그대로 둡니다.
 
 ---
@@ -203,6 +203,28 @@ alter table public.yt_quota_log enable row level security;
 ```sql
 drop table if exists public.yt_quota_log;
 ```
+
+---
+
+## 0-E. ⚙️ 설정 행 허용 (v1.7) — ⚠️ **실행 대기 · 이거 없으면 토글이 안 먹습니다**
+
+화면의 켜기/끄기 설정(급상승 수집, 새 광맥 자동 탐사)과 '백카탈로그 완료' 표시는
+`yt_watches` 에 `type='setting'` 행으로 저장합니다. 그런데 **초기 스키마의 체크 제약에
+`setting` 이 빠져 있어** 저장이 거부됩니다. 지금까지 급상승 토글이 켜지지 않던 이유입니다.
+
+```sql
+alter table public.yt_watches drop constraint if exists yt_watches_type_check;
+alter table public.yt_watches add constraint yt_watches_type_check
+  check (type in ('keyword', 'channel', 'include_kw', 'exclude_kw', 'category', 'setting'));
+```
+
+실행 전에는 이렇게 동작합니다.
+
+| 기능 | 실행 전 | 실행 후 |
+|---|---|---|
+| 🔥 급상승 수집 토글 | 저장 실패 안내(항상 off) | 정상 |
+| ⛏ 새 광맥 자동 탐사 토글 | 저장 실패 안내(항상 off · `🔎 지금 탐사` 버튼은 동작) | 정상 |
+| 백카탈로그 완료 채널 제외 | 표시가 안 남아 다음 회차에 또 훑음 (영상 500개 상한에 걸린 채널은 그대로 제외) | 끝까지 훑은 채널도 순회에서 빠짐 |
 
 ---
 
