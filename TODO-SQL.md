@@ -5,8 +5,48 @@
 
 실행 전에도 서버는 죽지 않습니다. 해당 기능만 조용히 비어 있습니다.
 
-**2026-08-17 기준 남은 작업 없음 — 아래 SQL 은 전부 실행 완료됐습니다.**
+**⚠️ 실행 대기 1건 — `0-B. 개념 태그` 입니다.** 나머지는 전부 실행 완료됐습니다.
 문서는 무엇을 왜 넣었는지 남겨 두려고 그대로 둡니다.
+
+---
+
+## 0-B. 🏷 개념 태그 (v1.4) — ⚠️ **실행 대기**
+
+후보함 행에 손으로 붙이는 주제어입니다. 제목에서 기계적으로 뽑은 낱말보다 정확해서,
+`🔎 관련` 탐색이 **태그가 있으면 태그를 먼저** 검색어로 씁니다.
+
+```sql
+-- 개념 태그: 후보함에서 손으로 붙이는 주제어 (없으면 null)
+alter table public.yt_videos add column if not exists concept_tags text[];
+
+-- 태그로 거슬러 찾을 때를 위한 인덱스 (배열 포함 검색)
+create index if not exists yt_videos_concept_tags_gin
+  on public.yt_videos using gin (concept_tags);
+```
+
+### 실행하면 이렇게 동작합니다
+
+| 항목 | 동작 |
+|---|---|
+| 태그 입력 | 후보함(⭐ 이상) 행의 제목 아래 입력칸. **쉼표로 여러 개**를 한 번에 |
+| 저장 시점 | `Enter` 또는 입력칸 밖을 누를 때 (`POST /api/pick` 의 `concept_tags`) |
+| 정리 규칙 | 앞뒤 공백·`#` 제거, 대소문자 무시 중복 제거, **태그당 24자·영상당 8개**까지 |
+| 태그 칩 누르기 | 그 태그로 `🔎 관련` 탐색 |
+| `×` | 그 태그만 빼기 |
+| `🔎 관련` | 태그가 있으면 태그 순서대로 먼저 시도, 없으면 기존 낱말 추출 |
+| `[아이디어로]` 복사 | `[D] 제목 \| URL \| #고독 #쇼펜하우어` |
+
+- 상수는 `server.js` 의 `CONCEPT_MAX`(8) · `CONCEPT_LEN`(24) 에서 고칩니다.
+- 실행 전에는 **입력칸이 아예 안 보입니다**(`GET /api/picks` 가 `concept_ready: false`).
+  그 상태로 저장을 시도하면 503 으로 안내합니다. 다른 기능은 정상입니다.
+- `upsert_videos` 는 갱신할 컬럼을 명시하는 함수라 **수집이 돌아도 태그는 보존**됩니다.
+
+### 되돌리려면
+
+```sql
+drop index if exists public.yt_videos_concept_tags_gin;
+alter table public.yt_videos drop column if exists concept_tags;
+```
 
 ---
 

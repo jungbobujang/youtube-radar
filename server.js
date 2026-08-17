@@ -1208,6 +1208,8 @@ const VERB_FORMS = [
   /.지지$/,                    // 무너지지
   /[어여아혀겨워려우]진$/,       // 밝혀진
   /[려어아]주(는|다|기)?$/,      // 알려주는
+  /.{2,}며$/,                  // 손해보며
+  /[아어여]야$/,                // 살아야, 해야
   /(도록|는가|지만|는데|니까|거든|이자)$/
 ]
 
@@ -1236,7 +1238,10 @@ function distinctiveness(word, index) {
 }
 
 // 변별력이 높은 순으로 정렬된 낱말 목록을 준다.
-function extractKeywords(title) {
+// loose=true 면 용언 어미 걸러내기를 건너뛴다. 제목이 온통 서술어라 명사가 하나도
+// 안 남는 경우(예: "손해보며 살아야 하는 이유") 관련 탐색이 빈손이 되지 않게 하는 예비용이다.
+function extractKeywords(title, { loose = false } = {}) {
+  const nounish = loose ? () => true : isNounish
   const cleaned = String(title ?? '')
     .replace(/[\u{1F300}-\u{1FAFF}\u{2600}-\u{27BF}]/gu, ' ') // 이모지
     .replace(/[[\]()（）{}<>|·・…"'"'`~!?.,:;#@*/\\_+=-]/g, ' ')
@@ -1247,10 +1252,10 @@ function extractKeywords(title) {
 
   // 어미는 떼기 전후로 두 번 본다. "죽는다해도"→"죽는다" 처럼 떼고 나서야 드러나기도 한다.
   const words = cleaned.split(' ')
-    .filter(isNounish)
+    .filter(nounish)
     .map((w) => w.replace(/^\d+/, '').replace(VERB_TAILS, '').replace(PARTICLES, ''))
     .filter((w) => w.length >= 2 && !STOPWORD_SET.has(w.toLowerCase()) &&
-      !/^\d+$/.test(w) && isNounish(w))
+      !/^\d+$/.test(w) && nounish(w))
 
   const seen = new Set()
   const uniq = []
@@ -1676,6 +1681,35 @@ async function pickColumnsReady() {
   return pickReady
 }
 
+// 개념 태그 컬럼은 따로 본다. 후보함 SQL(0-A)만 돌리고 이건 아직 안 돌렸을 수 있다.
+let conceptReady = null
+
+async function conceptColumnReady() {
+  if (conceptReady !== null) return conceptReady
+  const { error } = await supabase.from('yt_videos').select('concept_tags').limit(1)
+  conceptReady = !error
+  if (!conceptReady) {
+    console.warn(`[pick] 개념 태그 컬럼이 아직 없습니다 (TODO-SQL.md 0-B 참고): ${error.message}`)
+  }
+  return conceptReady
+}
+
+const CONCEPT_MAX = 8   // 한 영상에 붙일 수 있는 태그 수
+const CONCEPT_LEN = 24  // 태그 한 개의 글자 수
+
+// 화면은 쉼표로 여러 개를 한 번에 보낸다. 공백·# 정리, 중복(대소문자 무시) 제거, 개수 제한.
+function normalizeConceptTags(input) {
+  const raw = Array.isArray(input) ? input : String(input ?? '').split(',')
+  const out = []
+  for (const t of raw) {
+    const tag = String(t ?? '').replace(/[#\s]+/g, ' ').trim().slice(0, CONCEPT_LEN)
+    if (!tag || out.some((x) => x.toLowerCase() === tag.toLowerCase())) continue
+    out.push(tag)
+    if (out.length >= CONCEPT_MAX) break
+  }
+  return out
+}
+
 let targetCache = { at: 0, map: new Map() }
 
 // 채널 id -> 추정 용도. 그룹 편성은 자주 바뀌지 않으니 30분 캐시.
@@ -1718,10 +1752,18 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       })
     }
 
-    const { video_id, level, target_group } = req.body ?? {}
+    const { video_id, level, target_group, concept_tags } = req.body ?? {}
     if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
 
     const patch = {}
+    if (concept_tags !== undefined) {
+      if (!(await conceptColumnReady())) {
+        return res.status(503).json({
+          error: '개념 태그 컬럼이 아직 없어요. TODO-SQL.md 0-B 의 SQL 을 먼저 실행해 주세요'
+        })
+      }
+      patch.concept_tags = normalizeConceptTags(concept_tags)
+    }
     if (level !== undefined) {
       const lv = Number(level)
       if (!PICK_LEVELS.includes(lv)) return res.status(400).json({ error: '레벨을 확인해 주세요' })
@@ -1750,9 +1792,13 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       }
     }
 
+    // 컬럼이 없는 상태에서 concept_tags 를 select 하면 통째로 에러가 난다
+    const cols = 'video_id, pick_level, target_group, starred_at' +
+      ((await conceptColumnReady()) ? ', concept_tags' : '')
+
     const { data, error } = await supabase
       .from('yt_videos').update(patch).eq('video_id', video_id)
-      .select('video_id, pick_level, target_group, starred_at').single()
+      .select(cols).single()
     if (error) throw error
     res.json(data)
   } catch (err) {
@@ -1841,7 +1887,8 @@ app.get('/api/picks', requireAuth, async (req, res) => {
       summary.by_target.none = rows.length
     }
 
-    res.json({ rows, summary, ready })
+    // 개념 태그 컬럼이 없으면 화면에서 입력칸 자체를 감춘다 (저장할 때 503 을 보느니)
+    res.json({ rows, summary, ready, concept_ready: await conceptColumnReady() })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -1953,9 +2000,17 @@ app.get('/api/related', requireAuth, async (req, res) => {
     let keyword = q
 
     if (video_id) {
+      const ready = await conceptColumnReady()
       const { data } = await supabase
-        .from('yt_videos').select('title').eq('video_id', video_id).single()
-      keywords = extractKeywords(data?.title)
+        .from('yt_videos').select(ready ? 'title, concept_tags' : 'title')
+        .eq('video_id', video_id).single()
+
+      // 손으로 붙인 개념 태그가 제목에서 뽑은 낱말보다 정확하다. 있으면 먼저 쓴다.
+      const tags = normalizeConceptTags(data?.concept_tags ?? [])
+      const lower = new Set(tags.map((t) => t.toLowerCase()))
+      const words = extractKeywords(data?.title)
+      const fromTitle = words.length > 0 ? words : extractKeywords(data?.title, { loose: true })
+      keywords = [...tags, ...fromTitle.filter((w) => !lower.has(w.toLowerCase()))]
     }
 
     if (keyword) {

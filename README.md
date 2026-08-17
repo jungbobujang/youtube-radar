@@ -298,9 +298,9 @@ logs/               수집 실패 로그·할당량 장부 (자동 생성 · git
 | `GET  /api/fresh` | 📡 신작 — 감시 채널의 최근 30일 영상 |
 | `GET  /api/weekly` | 📊 주간 — 지난 7일 요약 JSON (수동 조회, cron 미등록) |
 | `GET  /api/picks` | 🗂 후보함 목록 + 용도별 요약 (`level`, `target` 필터) |
-| `POST /api/pick` | 픽 레벨(0/1/2)·용도 태그 지정 |
+| `POST /api/pick` | 픽 레벨(0/1/2)·용도 태그·개념 태그 지정 |
 | `GET  /api/starred` · `POST /api/star` | 옛 이름 (픽 레벨로 매핑해 그대로 동작) |
-| `GET  /api/related` | 🔎 관련 주제 — DB 안에서만 (할당량 0) |
+| `GET  /api/related` | 🔎 관련 주제 — DB 안에서만 (할당량 0 · 개념 태그 우선) |
 | `POST /api/related/search` | 🔎 관련 주제 — 유튜브 전체 검색 (100유닛) |
 | `GET  /api/radar` | 30점 이상 영상, 점수순 + 걸린 키워드 |
 | `GET  /api/discover` | 최근 2일 내 발견 영상, 조회수순 |
@@ -351,6 +351,30 @@ logs/               수집 실패 로그·할당량 장부 (자동 생성 · git
 
 > 컬럼 추가 SQL 은 `TODO-SQL.md` **0-A** 에 있습니다. 실행 전에는 후보함이 옛 즐겨찾기를
 > 그대로 보여주고, 픽 변경은 503 으로 안내합니다. 나머지 기능은 정상입니다.
+
+#### 개념 태그
+
+후보함 행의 **제목 아래**에 붙는 입력칸입니다. 제목에서 기계적으로 뽑은 낱말보다
+사람이 붙인 주제어가 정확해서, `🔎 관련` 탐색이 **태그를 먼저** 검색어로 씁니다.
+
+| 항목 | 동작 |
+|---|---|
+| 입력 | **쉼표로 여러 개**를 한 번에. `Enter` 또는 입력칸 밖을 누르면 저장 |
+| 정리 | 앞뒤 공백·`#` 제거, 대소문자 무시 중복 제거, 태그당 24자 · 영상당 8개까지 |
+| 태그 칩 | 누르면 그 태그로 관련 탐색, `×` 는 그 태그만 빼기 |
+| `[아이디어로]` 복사 | `[D] 제목 \| URL \| #고독 #쇼펜하우어` |
+
+한도는 `server.js` 의 `CONCEPT_MAX` · `CONCEPT_LEN` 에서 고칩니다.
+태그가 없으면 관련 탐색은 지금까지처럼 제목에서 낱말을 뽑아 씁니다.
+
+```sql
+alter table public.yt_videos add column if not exists concept_tags text[];
+create index if not exists yt_videos_concept_tags_gin
+  on public.yt_videos using gin (concept_tags);
+```
+
+> SQL 실행 전에는 입력칸이 아예 보이지 않습니다(`/api/picks` 가 `concept_ready: false`).
+> 전문은 `TODO-SQL.md` **0-B** 에 있습니다.
 
 ### 상태바
 

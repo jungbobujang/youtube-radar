@@ -174,6 +174,27 @@
   .tchip:hover { border-color: var(--ink-faint); color: var(--ink-soft); }
   .tchip-on { background: var(--ink); border-color: var(--ink); color: #fff; }
   .tchip-none { background: #f1efe8; color: var(--ink-faint); }
+
+  /* 개념 태그 — 제목 아래 한 줄. 지표 스트립과 달리 넘치면 줄바꿈한다. */
+  .ctags { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 5px; }
+  .ctag {
+    display: inline-flex; align-items: center; overflow: hidden;
+    border: 1px solid var(--line); border-radius: 999px; background: var(--surface);
+  }
+  .ctag-go, .ctag-x {
+    border: none; background: none; color: var(--ink-soft);
+    font-size: 11px; line-height: 1.6; padding: 2px 4px 2px 8px;
+  }
+  .ctag-x { padding: 2px 8px 2px 4px; color: var(--ink-faint); font-size: 12px; }
+  .ctag-go:hover { color: var(--ink); }
+  .ctag-x:hover { color: #a3222d; }
+  .ctag-in {
+    border: 1px dashed var(--line); border-radius: 999px; background: none;
+    color: var(--ink); font: inherit; font-size: 11px; padding: 2px 9px;
+    width: 150px; max-width: 100%;
+  }
+  .ctag-in:focus { border-style: solid; border-color: var(--ink-faint); outline: none; }
+  .ctag-in::placeholder { color: var(--ink-faint); }
   .toast { margin: 0 0 8px; }
   .rel { flex: none; white-space: nowrap; }
 
@@ -319,6 +340,10 @@
     .tools .star { font-size: 22px; padding: 0 8px; }
     .tools .heart { font-size: 18px; padding: 0 8px; }
     .tchip { min-width: 44px; min-height: 44px; font-size: 14px; }
+    /* 태그는 눌러서 지우는 자리라 손가락 크기를 지킨다 */
+    .ctag-go, .ctag-x { min-height: 36px; font-size: 13px; display: inline-flex; align-items: center; }
+    .ctag-x { min-width: 32px; justify-content: center; }
+    .ctag-in { min-height: 36px; font-size: 14px; }
 
     /* 버튼이 44px 로 커진 만큼 제목이 밀린다. 라벨을 떼고 지표 폭을 줄여
        제목이 볼 자리를 되찾는다 (라벨은 title 속성에 남아 있다). */
@@ -660,6 +685,7 @@ function videoRow(v, extra = '', opts = {}) {
         <span>${day(v.published_at)}</span>
         ${v.duration_sec != null ? `<span>${durLabel(v.duration_sec)}</span>` : ''}
       </div>
+      ${opts.metaExtra ?? ''}
     </div>
     <div class="tools">${extra}${tools}</div>
   </div>
@@ -795,10 +821,21 @@ function growthChip(g) {
 
 const IDEA_FACE = '💡<span class="lbl"> 아이디어로</span>'
 
+const tagList = (v) => (Array.isArray(v.concept_tags) ? v.concept_tags : [])
+
 function ideaButton(v) {
   return `<button class="btn-ghost btn-sm idea" title="제목·링크 복사"
     data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}"
-    data-target="${esc(v.target_group ?? '')}">${IDEA_FACE}</button>`
+    data-target="${esc(v.target_group ?? '')}"
+    data-tags="${esc(tagList(v).join(','))}">${IDEA_FACE}</button>`
+}
+
+// 복사 문구: "[D] 제목 | URL | #고독 #니체"
+function ideaText(b) {
+  const target = b.dataset.target ? `[${b.dataset.target}] ` : ''
+  const tags = (b.dataset.tags || '').split(',').filter(Boolean)
+  const tail = tags.length ? ` | ${tags.map((t) => `#${t}`).join(' ')}` : ''
+  return `${target}${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}${tail}`
 }
 
 // ---------------------------------------------------------------- 후보 관리함
@@ -813,6 +850,23 @@ function targetChips(v) {
         data-target-set="${esc(v.video_id)}|${t}"
         title="용도 ${t}${cur === t ? ' (다시 누르면 미지정)' : ''}">${t}</button>`).join('')}
   </span>`
+}
+
+// 개념 태그 — 제목에서 뽑은 낱말 대신 손으로 붙이는 주제어.
+// 지표 스트립이 아니라 제목 아래에 둔다 (길어지면 줄바꿈으로 흘러야 해서).
+// 태그를 누르면 그 말로 관련 탐색, × 는 그 태그만 뺀다.
+function conceptTags(v) {
+  const tags = tagList(v)
+  return `<div class="ctags" data-ctags="${esc(v.video_id)}">
+    ${tags.map((t) => `
+      <span class="ctag">
+        <button class="ctag-go" data-ctag-go="${esc(t)}" title="이 태그로 관련 탐색">#${esc(t)}</button>
+        <button class="ctag-x" data-ctag-del="${esc(t)}" title="태그 빼기" aria-label="태그 빼기">×</button>
+      </span>`).join('')}
+    <input class="ctag-in" type="text" maxlength="120"
+      placeholder="${tags.length ? '태그 추가' : '개념 태그 (쉼표로 여러 개)'}"
+      aria-label="개념 태그 입력">
+  </div>`
 }
 
 // ⭐ 후보 / ❤️ 확정. ❤️ 를 다시 누르면 ⭐ 로 내린다.
@@ -843,7 +897,55 @@ function undropRow(restore) {
   if (restore.panel) restore.panel.style.display = ''
 }
 
+// 태그 한 줄은 자기 자신만 다시 그린다. 목록 전체를 render() 하면
+// 스크롤 위치와 입력 포커스가 날아가 연달아 태그를 붙이기 어렵다.
+function wireConceptTags(panel, box) {
+  if (!box) return
+  const videoId = box.dataset.ctags
+  const input = box.querySelector('.ctag-in')
+  const shown = () => [...box.querySelectorAll('[data-ctag-go]')].map((c) => c.dataset.ctagGo)
+
+  const save = async (tags, keepFocus) => {
+    let data
+    try {
+      data = await api('/api/pick', {
+        method: 'POST', body: JSON.stringify({ video_id: videoId, concept_tags: tags })
+      })
+    } catch (e) { toast(panel, e.message); return }
+
+    // 서버가 정리한 결과(공백·중복·개수 제한)를 그대로 되받아 다시 그린다
+    const saved = data.concept_tags ?? []
+    box.outerHTML = conceptTags({ video_id: videoId, concept_tags: saved })
+    const fresh = panel.querySelector(`[data-ctags="${CSS.escape(videoId)}"]`)
+    wireConceptTags(panel, fresh)
+
+    const idea = fresh?.closest('.row')?.querySelector('.idea')
+    if (idea) idea.dataset.tags = saved.join(',')
+    if (keepFocus) fresh?.querySelector('.ctag-in')?.focus()
+  }
+
+  // 쉼표로 여러 개를 한 번에. Enter 로도, 다른 곳을 눌러도 저장된다.
+  const add = (keepFocus) => {
+    const raw = input.value.trim()
+    if (!raw) return
+    input.value = '' // Enter 로 이미 저장한 것을 blur 가 또 저장하지 않게
+    save([...shown(), ...raw.split(',')], keepFocus)
+  }
+
+  input.onkeydown = (e) => { if (e.key === 'Enter') { e.preventDefault(); add(true) } }
+  input.onblur = () => add(false)
+
+  box.querySelectorAll('[data-ctag-del]').forEach((b) => {
+    b.onclick = () => save(shown().filter((t) => t !== b.dataset.ctagDel), false)
+  })
+  box.querySelectorAll('[data-ctag-go]').forEach((b) => {
+    b.onclick = () => toggleRelated(panel, videoId, b.dataset.ctagGo)
+  })
+}
+
 function wireRows(panel) {
+  panel.querySelectorAll('.ctags').forEach((box) => wireConceptTags(panel, box))
+
   // 발굴·신작 등 목록의 ★ — 누르면 후보로 담고 그 자리에서 사라진다
   panel.querySelectorAll('[data-star]').forEach((b) => {
     b.onclick = async () => {
@@ -907,9 +1009,7 @@ function wireRows(panel) {
 
   panel.querySelectorAll('.idea').forEach((b) => {
     b.onclick = async () => {
-      // 용도가 지정돼 있으면 "[D] 제목 | URL" 로 붙여 넣는다
-      const tag = b.dataset.target ? `[${b.dataset.target}] ` : ''
-      const text = `${tag}${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}`
+      const text = ideaText(b)
       try { await navigator.clipboard.writeText(text) } catch {
         const ta = document.createElement('textarea')
         ta.value = text; document.body.appendChild(ta); ta.select()
@@ -1023,7 +1123,8 @@ async function render() {
     }
 
     if (tab === 'picks') {
-      const { rows, summary, ready } = await api(`/api/picks?level=${pickLevel}&target=${pickTarget}`)
+      const { rows, summary, ready, concept_ready: conceptReady } =
+        await api(`/api/picks?level=${pickLevel}&target=${pickTarget}`)
       const chip = (val, label, n) => `<button class="btn-ghost btn-sm ${pickTarget === val ? 'fmt-on' : ''}"
         data-ptarget="${val}">${label}${n == null ? '' : ` ${n}`}</button>`
 
@@ -1051,7 +1152,7 @@ async function render() {
           ? rows.map((v) => videoRow(
               v,
               metricBadges(v, targetChips(v)) + ideaButton(v),
-              { tools: pickTools(v) }
+              { tools: pickTools(v), metaExtra: conceptReady ? conceptTags(v) : '' }
             )).join('')
           : stateBox('여기 담긴 영상이 없어요', '발굴·신작 목록에서 ★ 을 누르면 이리로 옵니다.')}
       `
