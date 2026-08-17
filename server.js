@@ -1403,10 +1403,12 @@ function classify(video, snapshots) {
 }
 
 async function buildTracking(limit = 60) {
-  const { data: videos, error } = await supabase
-    .from('yt_videos')
-    .select('*')
-    .gte('score', 0) // 걸러진 영상은 추이만 쌓고 화면에는 내보내지 않는다
+  const { data: videos, error } = await notHotQuery(
+    supabase
+      .from('yt_videos')
+      .select('*')
+      .gte('score', 0) // 걸러진 영상은 추이만 쌓고 화면에는 내보내지 않는다
+  )
     .order('first_seen_at', { ascending: false })
     .limit(limit)
   if (error) throw error
@@ -1949,11 +1951,13 @@ app.post('/api/login', (req, res) => {
 app.get('/api/discover', requireAuth, async (req, res) => {
   try {
     const since = new Date(Date.now() - 2 * DAY).toISOString()
-    const { data: videos, error } = await supabase
-      .from('yt_videos')
-      .select('*')
-      .gte('score', 0)
-      .gte('first_seen_at', since)
+    const { data: videos, error } = await notHotQuery(
+      supabase
+        .from('yt_videos')
+        .select('*')
+        .gte('score', 0)
+        .gte('first_seen_at', since)
+    )
       .order('first_seen_at', { ascending: false })
       .limit(40)
     if (error) throw error
@@ -1969,7 +1973,7 @@ app.get('/api/discover', requireAuth, async (req, res) => {
     for (const s of snaps ?? []) if (!(s.video_id in latest)) latest[s.video_id] = s.views
 
     res.json(hidePicked(
-      videos
+      onlyWatched(videos)
         .map((v) => ({ ...v, views: latest[v.video_id] ?? 0 }))
         .sort((a, b) => b.views - a.views),
       req
@@ -1996,6 +2000,16 @@ function excludePicked(query, req, ready) {
 // 후보함이 유일한 별 모음이 되도록 모든 목록에서 담긴 것을 뺀다.
 const hidePicked = (rows, req) =>
   req.query.picked === '1' ? rows : (rows ?? []).filter((v) => Number(v.pick_level ?? 0) < 1)
+
+// HOT 탐사로 들어온 영상(감시망 밖·해외)은 🔥 HOT 탭과 후보함에서만 본다.
+// 추적·급상승·레이더·주간은 감시 채널 중심 화면이라 섞이면 읽기가 어려워진다.
+const isOutsideWatch = (v) => String(v?.source ?? '').startsWith('hot:')
+const onlyWatched = (rows) => (rows ?? []).filter((v) => !isOutsideWatch(v))
+
+// 쿼리 단계에서 빼는 판. limit 이 걸린 목록은 받아 온 뒤에 거르면
+// 상한을 해외 영상이 다 차지해 정작 볼 것이 몇 건 안 남는다 (실측 60건 → 8건).
+// source 가 null 인 옛 행까지 날아가지 않게 is.null 을 함께 둔다.
+const notHotQuery = (q) => q.or('source.is.null,source.not.like.hot:*')
 
 // 💎 발굴 — 채널 중앙값 대비 배율이 높은 과거 영상
 app.get('/api/dig', requireAuth, async (req, res) => {
@@ -2977,7 +2991,11 @@ async function weeklyReport() {
 app.get('/api/weekly', requireAuth, async (req, res) => {
   try {
     const w = await weeklyReport()
-    res.json({ ...w, top_fresh: hidePicked(w.top_fresh, req), new_digs: hidePicked(w.new_digs, req) })
+    res.json({
+      ...w,
+      top_fresh: hidePicked(onlyWatched(w.top_fresh), req),
+      new_digs: hidePicked(onlyWatched(w.new_digs), req)
+    })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -3078,7 +3096,7 @@ app.get('/api/radar', requireAuth, async (req, res) => {
     const latest = {}
     for (const s of snaps ?? []) if (!(s.video_id in latest)) latest[s.video_id] = s.views
 
-    res.json(hidePicked(videos.map((v) => ({
+    res.json(hidePicked(onlyWatched(videos).map((v) => ({
       ...v,
       views: latest[v.video_id] ?? 0,
       hits: matchedKeywords(v.title, includeKws)
@@ -3090,7 +3108,7 @@ app.get('/api/radar', requireAuth, async (req, res) => {
 
 app.get('/api/tracking', requireAuth, async (req, res) => {
   try {
-    res.json(hidePicked(await buildTracking(), req))
+    res.json(hidePicked(onlyWatched(await buildTracking()), req))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
