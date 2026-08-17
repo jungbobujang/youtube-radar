@@ -178,6 +178,17 @@
   .tchip-on { background: var(--ink); border-color: var(--ink); color: #fff; }
   .tchip-none { background: #f1efe8; color: var(--ink-faint); }
 
+  /* 🔥 HOT — 추천 채널 행 (썸네일 없이 채널 정보 + 대표작) */
+  .hot-ch .meta { min-width: 0; }
+  .hot-hit {
+    display: flex; gap: 8px; align-items: baseline; margin-top: 4px;
+    font-size: 12.5px; line-height: 1.5;
+  }
+  .hot-hit a { color: var(--ink-soft); text-decoration: none; overflow: hidden;
+               text-overflow: ellipsis; white-space: nowrap; }
+  .hot-hit a:hover { color: var(--ink); text-decoration: underline; }
+  .hot-hit .muted { flex: none; }
+
   /* 개념 태그 — 제목 아래 한 줄. 지표 스트립과 달리 넘치면 줄바꿈한다. */
   .ctags { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; margin-top: 5px; }
   .ctag {
@@ -707,7 +718,7 @@ function videoRow(v, extra = '', opts = {}) {
   return `<div class="row row-v">
     <img class="thumb" loading="lazy" src="https://img.youtube.com/vi/${esc(v.video_id)}/mqdefault.jpg" alt="">
     <div class="meta">
-      <a class="title" href="https://www.youtube.com/watch?v=${esc(v.video_id)}" target="_blank" rel="noopener noreferrer">${esc(v.title)}</a>
+      <a class="title" href="https://www.youtube.com/watch?v=${esc(v.video_id)}" target="_blank" rel="noopener noreferrer">${isGlobal(v) ? '🌍 ' : ''}${esc(v.title)}</a>
       <div class="sub">
         <span class="ch">${esc(v.channel_title || '')}</span>
         <span title="${fmt(v.views ?? v.latest)}">조회 ${shortNum(v.views ?? v.latest)}</span>
@@ -857,15 +868,50 @@ function ideaButton(v) {
   return `<button class="btn-ghost btn-sm idea" title="제목·링크 복사"
     data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}"
     data-target="${esc(v.target_group ?? '')}"
+    data-global="${isGlobal(v) ? '1' : ''}"
     data-tags="${esc(tagList(v).join(','))}">${IDEA_FACE}</button>`
 }
 
-// 복사 문구: "[D] 제목 | URL | #고독 #니체"
+// 복사 문구: "[해외] 원제 | URL" · "[D] 제목 | URL | #고독 #니체"
 function ideaText(b) {
-  const target = b.dataset.target ? `[${b.dataset.target}] ` : ''
+  const target = b.dataset.global ? '[해외] ' : (b.dataset.target ? `[${b.dataset.target}] ` : '')
   const tags = (b.dataset.tags || '').split(',').filter(Boolean)
   const tail = tags.length ? ` | ${tags.map((t) => `#${t}`).join(' ')}` : ''
   return `${target}${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}${tail}`
+}
+
+// ---------------------------------------------------------------- 🔥 HOT
+
+// 해외 영상은 제목을 손대지 않는다. 원문 그대로 두고 표시만 구분한다.
+const isGlobal = (v) => String(v.source ?? '').startsWith('hot:global')
+
+function hotChannelRow(c) {
+  return `<div class="row hot-ch">
+    <div class="meta">
+      <span class="title">${c.global ? '🌍 ' : ''}${esc(c.channel_title || c.channel_id)}</span>
+      <div class="sub">
+        <span>구독 ${shortNum(c.subscriber_count)}</span>
+        ${c.reach != null ? `<span class="m" title="대표작 조회수 / 구독자수">침투 ${c.reach}</span>` : ''}
+        <span>걸린 영상 ${c.found}편</span>
+      </div>
+      ${c.hits.map((h) => `<div class="hot-hit">
+        <a href="https://www.youtube.com/watch?v=${esc(h.video_id)}" target="_blank" rel="noopener noreferrer">${esc(h.title)}</a>
+        <span class="muted">${shortNum(h.views)}</span>
+      </div>`).join('')}
+    </div>
+    <div class="tools">
+      <button class="btn btn-sm" data-watch-add="${esc(c.channel_id)}"
+        data-label="${esc(c.channel_title || '')}">+ 감시 추가</button>
+    </div>
+  </div>`
+}
+
+// 국내에서 이미 다뤄진 정도 — 겹치지 않는 광맥을 먼저 보려고 붙인다
+function coverageChip(v) {
+  if (v.kr_coverage == null) return ''
+  return v.kr_coverage === 0
+    ? '<span class="m m-fresh">🇰🇷 국내 아직 없음</span>'
+    : `<span class="m m-sat">🇰🇷 국내 ${v.kr_coverage}개 채널이 다룸</span>`
 }
 
 // ---------------------------------------------------------------- 댓글
@@ -1422,6 +1468,73 @@ async function render() {
       return
     }
 
+    if (tab === 'hot') {
+      const h = await api(`/api/hot?${pq()}`)
+      const seen = h.last_prospect_at
+        ? new Date(h.last_prospect_at).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' })
+        : '아직 없음'
+
+      panel.innerHTML = `
+        <div class="filters">
+          <button class="btn btn-sm" id="hot-go">🔥 지금 탐사 <span class="muted">(약 ${fmt(h.cost)}유닛)</span></button>
+          <span class="muted">마지막 탐사 ${esc(seen)}</span>
+          ${pickedToggle()}
+        </div>
+        <p class="err" id="hot-err"></p>
+
+        <h3 class="sec">🔥 지금 뜨는 주제 <span class="muted">최근 90일 · 배율·침투 상위 · 할당량 0</span></h3>
+        ${h.trending.length
+          ? h.trending.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
+          : '<p class="empty">최근 90일에 배율이 뜬 영상이 아직 없어요.</p>'}
+
+        <h3 class="sec">📺 추천 채널 <span class="muted">감시망 밖 · 구독자 대비 아웃라이어</span></h3>
+        ${h.channels.length
+          ? h.channels.map(hotChannelRow).join('')
+          : '<p class="empty">탐사로 걸린 새 채널이 없어요. [🔥 지금 탐사]를 눌러 보세요.</p>'}
+
+        <h3 class="sec">🌍 해외 광맥
+          <span class="muted">${h.pairs.map((p) => esc(p.en)).join(' · ')}</span></h3>
+        ${h.global.length
+          ? h.global.map((v) => videoRow(v, metricBadges(v, coverageChip(v)) + ideaButton(v))).join('')
+          : '<p class="empty">해외 탐사 결과가 아직 없어요.</p>'}
+      `
+
+      wireRows(panel)
+      wirePickedToggle()
+      panel.querySelectorAll('[data-watch-add]').forEach((b) => {
+        b.onclick = async () => {
+          b.disabled = true
+          try {
+            await api('/api/watches', {
+              method: 'POST',
+              body: JSON.stringify({ type: 'channel', value: b.dataset.watchAdd, label: b.dataset.label })
+            })
+            b.textContent = '✅ 감시 중'
+          } catch (e) {
+            b.disabled = false
+            toast(panel, e.message)
+          }
+        }
+      })
+      $('#hot-go').onclick = async () => {
+        const b = $('#hot-go')
+        b.disabled = true
+        b.textContent = '탐사 중... (1~2분)'
+        $('#hot-err').textContent = ''
+        try {
+          const r = await api('/api/hot/prospect', { method: 'POST', body: JSON.stringify({}) })
+          toast(panel, `탐사 완료 — 영상 ${fmt(r.saved)}건 · ${fmt(r.units)}유닛`)
+          refreshStatus()
+          render()
+        } catch (e) {
+          $('#hot-err').textContent = e.message
+          b.disabled = false
+          b.innerHTML = `🔥 지금 탐사 <span class="muted">(약 ${fmt(h.cost)}유닛)</span>`
+        }
+      }
+      return
+    }
+
     if (tab === 'radar') {
       const rows = await api(`/api/radar?${pq()}`)
       panel.innerHTML = `
@@ -1537,6 +1650,16 @@ async function render() {
         인기 급상승(mostPopular)도 함께 수집 — 기본은 꺼짐
       </label>
       <p class="muted">채널 백카탈로그 발굴이 주 전략이라 기본값은 off 입니다.</p>
+
+      <h3 class="sec">🔥 HOT 주간 탐사</h3>
+      <label class="cat">
+        <input type="checkbox" id="s-hot" ${settings.hotWeeklyOn ? 'checked' : ''}>
+        일요일 저녁마다 감시망 밖(국내·해외)을 한 번 훑기 — 기본은 켜짐
+      </label>
+      <p class="muted">
+        검색 1건당 100유닛이라 주 1회만 돕니다. 급할 때는 <b>🔥 HOT</b> 탭의
+        <b>지금 탐사</b> 버튼을 쓰세요.
+      </p>
 
       <h3 class="sec">⛏ 새 광맥 자동 탐사</h3>
       <label class="cat">
@@ -1688,6 +1811,11 @@ async function render() {
       }) }
       renderTabs()
     }
+    $('#s-hot').onchange = async (e) => {
+      settings = { ...settings, ...await api('/api/settings/hot-weekly', {
+        method: 'POST', body: JSON.stringify({ on: e.target.checked })
+      }) }
+    }
     $('#s-prospect').onchange = async (e) => {
       settings = { ...settings, ...await api('/api/settings/prospect', {
         method: 'POST', body: JSON.stringify({ on: e.target.checked })
@@ -1826,16 +1954,18 @@ async function refreshStatus() {
 
 function renderTabs() {
   const defs = [
-    ['dig', '💎 발굴'],
-    ['picks', '🗂 후보함'],
-    ['fresh', '📡 신작'],
-    ['weekly', '📊 주간'],
-    ...(settings.trendingOn ? [['discover', '🔥 급상승']] : []),
-    ['tracking', '📈 추적 중'],
-    ['watches', '⚙️ 감시 관리']
+    ['dig', '💎 발굴', '묵은 검증 주제 — 게시 6개월~3년 중 배율이 터진 영상'],
+    ['picks', '🗂 후보함', '예심 통과분과 내가 담은 영상 (별은 여기로 모입니다)'],
+    ['fresh', '📡 신작', '감시 채널이 최근 30일에 올린 영상'],
+    ['weekly', '📊 주간', '지난 7일 요약 — 신작 성과와 새로 걸린 발굴'],
+    ['hot', '🔥 HOT', '감시망 밖 트렌드 — 뜨는 주제·추천 채널·해외 광맥'],
+    ...(settings.trendingOn ? [['discover', '🔥 급상승', '유튜브 인기 급상승(mostPopular) 수집분']] : []),
+    ['tracking', '📈 추적 중', '수집된 영상의 조회수 증가 추이'],
+    ['watches', '⚙️ 감시 관리', '채널·키워드·그룹과 수집 설정']
   ]
   $('#tabs').innerHTML = defs
-    .map(([k, t]) => `<button class="tab ${tab === k ? 'tab-on' : ''}" data-tab="${k}">${t}</button>`)
+    .map(([k, t, tip]) => `<button class="tab ${tab === k ? 'tab-on' : ''}" data-tab="${k}"
+      title="${esc(tip)}">${t}</button>`)
     .join('')
   document.querySelectorAll('.tab').forEach((b) => {
     b.onclick = () => { tab = b.dataset.tab; renderTabs(); render() }

@@ -909,6 +909,7 @@ async function channelMap() {
 // 갱신 주기를 달리한다. 상수는 전부 여기서 조절한다.
 const COLLECT_CRON = '0 6,21 * * *'  // 하루 2회 — 한국시간 06:00 / 21:00
 const COLLECT_TZ = 'Asia/Seoul'      // 배포지(Railway)가 UTC 라도 한국 기준으로 돈다
+const HOT_CRON = '0 20 * * 0'        // 🔥 HOT 탐사 — 일요일 저녁 20:00
 const BOOT_COLLECT_GAP_H = 6         // 재시작 직후 수집은 마지막 수집이 이만큼 지났을 때만
 
 // 통계 갱신 차등 — 오래된 영상까지 매번 다시 읽을 이유가 없다 (50개당 1유닛)
@@ -1153,7 +1154,9 @@ async function readSettings() {
   const flags = new Set((data ?? []).map((r) => r.value))
   return {
     trendingOn: flags.has('trending_on'), // 기본 off
-    prospectOn: flags.has('prospect_on')  // 새 광맥 탐사(키워드 검색) — 기본 off
+    prospectOn: flags.has('prospect_on'), // 정규 수집에 키워드 검색 포함 — 기본 off
+    // 🔥 HOT 주간 탐사만 기본 on 이다. 끄면 'hot_weekly_off' 행이 생긴다.
+    hotWeeklyOn: !flags.has('hot_weekly_off')
   }
 }
 
@@ -1555,6 +1558,193 @@ async function relatedFromDb(keyword, excludeId) {
   return rescoreByTier(rows)
     .sort((a, b) => b.dig_score - a.dig_score)
     .slice(0, 10)
+}
+
+// ---------------------------------------------------------------- 🔥 HOT (감시망 밖)
+//
+// 감시 채널 안쪽만 보면 이미 아는 광맥만 계속 판다. HOT 은 바깥을 본다.
+// 검색은 1건당 100유닛이라 자동으로는 주 1회만 돌고, 나머지는 수동 버튼이다.
+// 받아 온 영상은 yt_videos 에 source='hot:kr:<말>' / 'hot:global:<말>' 로 남는다.
+const HOT = {
+  KR_TERMS: 3,           // 국내 탐사에 쓸 관심 키워드 수 (1건당 100유닛)
+  EN_TERMS: 3,           // 해외 탐사에 쓸 키워드 수 (1건당 100유닛)
+  SEARCH_RESULTS: 25,    // 검색 1건당 받아올 영상 수
+  SEARCH_DAYS: 365,      // 검색 대상 기간
+  TRENDING_DAYS: 90,     // '지금 뜨는 주제' 로 볼 최근 기간
+  TRENDING_MIN_MULT: 3,  // '지금 뜨는 주제' 최소 배율
+  OUTLIER_REACH: 1,      // 아웃라이어 기준 — 조회수가 구독자 수보다 많을 것
+  OUTLIER_VIEWS: 50000,  // 구독자를 모를 때 대신 볼 최소 조회수
+  TOP: 30,               // 섹션별 최대 표시 수
+  // 검색을 viewCount 순으로 하면 해시태그 쇼츠가 화면을 통째로 덮는다.
+  // 우리 전략은 롱폼이라 3분 이하(shorts·mid)는 걸러 낸다.
+  FORMATS: ['long']
+}
+
+// 관심 키워드 ↔ 영어 검색어. 해외 탐사 대상은 여기만 고치면 바뀐다.
+// 왼쪽(국내어)은 '국내에서 이미 다뤄진 정도' 를 셀 때도 쓴다.
+const HOT_KEYWORD_PAIRS = [
+  ['자기계발', 'self improvement'],
+  ['뇌과학', 'neuroscience'],
+  ['습관', 'habits'],
+  ['심리학', 'psychology'],
+  ['동기부여', 'motivation'],
+  ['미루기', 'procrastination']
+]
+
+async function watchedChannelIds() {
+  const { data } = await supabase.from('yt_watches').select('value').eq('type', 'channel')
+  return new Set((data ?? []).map((w) => w.value))
+}
+
+// 내 관심사는 따로 적어 두지 않는다. 담아 둔 것과 발굴 상위의 제목에서 뽑는다.
+async function interestKeywords(limit) {
+  const titles = []
+  if (await pickColumnsReady()) {
+    const { data } = await supabase
+      .from('yt_videos').select('title').gte('pick_level', 1).limit(100)
+    titles.push(...(data ?? []).map((r) => r.title))
+  }
+  const { data: digs } = await supabase
+    .from('yt_videos').select('title')
+    .gte('multiple', 5).gte('score', 0)
+    .order('multiple', { ascending: false }).limit(100)
+  titles.push(...(digs ?? []).map((r) => r.title))
+
+  // 이미 감시 중인 채널·프로그램 이름은 뺀다. 그 말로 검색해 봐야 그 채널만 또 나온다.
+  const { data: chans } = await supabase
+    .from('yt_watches').select('label, value').eq('type', 'channel')
+  const { data: known } = await supabase.from('yt_channels').select('title')
+  // 이름 전체와 그 안의 낱말만 정확히 일치할 때 뺀다. 부분 문자열로 걸면
+  // '동기부여' 같은 멀쩡한 관심어까지 채널 이름에 스쳤다는 이유로 사라진다.
+  const names = new Set()
+  for (const n of [...(chans ?? []).map((c) => c.label), ...(known ?? []).map((c) => c.title)]) {
+    const s = String(n ?? '').trim()
+    if (!s) continue
+    names.add(s)
+    for (const w of s.split(/\s+/)) if (w.length >= 2) names.add(w)
+  }
+
+  const count = new Map()
+  for (const t of titles) {
+    // 제목마다 가장 변별력 있는 낱말 2개씩만 센다
+    for (const w of extractKeywords(t).slice(0, 2)) {
+      count.set(w, (count.get(w) ?? 0) + 1)
+    }
+  }
+  return [...count.entries()]
+    .filter(([w, n]) => n >= 2 && w.length >= 2 && !names.has(w))
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, limit)
+    .map(([w]) => w)
+}
+
+// 검색 한 번 = search.list 100 + videos.list 1
+async function hotSearch(term, source, cfg, extra = {}) {
+  const publishedAfter = new Date(Date.now() - HOT.SEARCH_DAYS * DAY).toISOString()
+  const found = await ytGet('search', {
+    part: 'snippet', type: 'video', maxResults: HOT.SEARCH_RESULTS,
+    q: term, order: 'viewCount', publishedAfter, ...extra
+  })
+  addUnitsToday(100, 'hot')
+
+  const ids = (found.items ?? []).map((i) => i.id?.videoId).filter(Boolean)
+  if (ids.length === 0) return { saved: 0, units: 100, ids: [] }
+
+  const details = await fetchVideoDetails(ids)
+  addUnitsToday(Math.ceil(ids.length / 50), 'hot')
+  const saved = await saveVideos(details, source, cfg)
+  return { saved, units: 100 + Math.ceil(ids.length / 50), ids }
+}
+
+// 감시 밖 채널의 구독자 수를 채워 둔다 (침투력 계산에 필요). 50개당 1유닛.
+async function cacheDiscoveredChannels(channelIds) {
+  const watched = await watchedChannelIds()
+  const known = await channelMap()
+  const need = [...new Set(channelIds)].filter((id) => id && !watched.has(id) && !known.has(id))
+  if (need.length === 0) return { updated: 0, units: 0 }
+
+  let units = 0
+  const rows = []
+  for (let i = 0; i < need.length; i += 50) {
+    const data = await ytGet('channels', { part: 'snippet,statistics', id: need.slice(i, i + 50).join(',') })
+    units += 1
+    addUnitsToday(1, 'hot')
+    for (const c of data.items ?? []) {
+      rows.push({
+        channel_id: c.id,
+        title: c.snippet?.title ?? null,
+        subscriber_count: Number(c.statistics?.subscriberCount ?? 0),
+        recent_median_views: 0, // 감시 채널이 아니라 배율은 내지 않는다
+        updated_at: new Date().toISOString()
+      })
+    }
+  }
+  if (rows.length > 0) {
+    const { error } = await supabase.from('yt_channels').upsert(rows, { onConflict: 'channel_id' })
+    if (error) throw error
+  }
+  return { updated: rows.length, units }
+}
+
+// 탐사 1회 비용을 미리 알려 준다 (버튼에 표시)
+const hotCost = () => (HOT.KR_TERMS + HOT.EN_TERMS) * 101 + 2
+
+async function prospectHot({ kr = true, global = true } = {}) {
+  const report = { units: 0, saved: 0, terms: [], errors: [] }
+
+  const { data: watches } = await supabase.from('yt_watches').select('*').eq('active', true)
+  const cfg = {
+    includeKws: (watches ?? []).filter((w) => w.type === 'include_kw').map((w) => w.value),
+    excludeKws: (watches ?? []).filter((w) => w.type === 'exclude_kw').map((w) => w.value),
+    categoryIds: (watches ?? []).filter((w) => w.type === 'category').map((w) => String(w.value))
+  }
+
+  const jobs = []
+  if (kr) {
+    for (const term of await interestKeywords(HOT.KR_TERMS)) {
+      jobs.push({ term, source: `hot:kr:${term}`, extra: {}, scope: 'kr' })
+    }
+  }
+  if (global) {
+    for (const [ko, en] of HOT_KEYWORD_PAIRS.slice(0, HOT.EN_TERMS)) {
+      jobs.push({
+        term: en, source: `hot:global:${ko}`, scope: 'global',
+        extra: { relevanceLanguage: 'en', regionCode: 'US' }
+      })
+    }
+  }
+
+  const foundChannels = []
+  for (const job of jobs) {
+    try {
+      const r = await hotSearch(job.term, job.source, cfg, job.extra)
+      report.units += r.units
+      report.saved += r.saved
+      report.terms.push({ term: job.term, scope: job.scope, saved: r.saved })
+
+      // 방금 저장한 영상들의 채널을 모아 둔다 (구독자 수를 채우려고)
+      if (r.ids.length > 0) {
+        const { data } = await supabase
+          .from('yt_videos').select('channel_id').in('video_id', r.ids)
+        foundChannels.push(...(data ?? []).map((v) => v.channel_id))
+      }
+    } catch (err) {
+      logFailure(`hot:${job.term}`, err)
+      report.errors.push(`${job.term}: ${err.message}`)
+      if (isQuotaError(err)) { report.aborted = 'quota'; break }
+    }
+  }
+
+  try {
+    const c = await cacheDiscoveredChannels(foundChannels)
+    report.units += c.units
+    report.channels = c.updated
+  } catch (err) {
+    report.errors.push(`채널 정보: ${err.message}`)
+  }
+
+  console.log(`[hot] 탐사 완료 — 검색 ${report.terms.length}건 · 영상 ${report.saved}건 · ${report.units}유닛`)
+  return report
 }
 
 // ---------------------------------------------------------------- 자동 예심 (0차 선별)
@@ -2040,7 +2230,9 @@ app.post('/api/watch-groups', requireAuth, async (req, res) => {
 // 설정 토글은 전부 같은 모양이다 (yt_watches 의 setting 행 하나)
 const SETTING_FLAGS = {
   trending: { value: 'trending_on', label: '급상승 수집' },
-  prospect: { value: 'prospect_on', label: '새 광맥 자동 탐사' }
+  prospect: { value: 'prospect_on', label: '새 광맥 자동 탐사' },
+  // 기본이 on 이라 '꺼 두었다' 는 사실을 행으로 남긴다 (다른 토글과 반대)
+  hotWeekly: { value: 'hot_weekly_off', label: 'HOT 주간 탐사 끔', inverted: true }
 }
 
 // 설정 행은 yt_watches 에 type='setting' 으로 들어간다. 그런데 초기 스키마의
@@ -2054,6 +2246,8 @@ const isTypeCheckError = (err) => /type_check/i.test(err?.message ?? '')
 async function toggleSetting(name, on) {
   const flag = SETTING_FLAGS[name]
   if (!flag) throw new Error('알 수 없는 설정이에요')
+  // inverted 인 설정은 '켜기' 가 곧 행을 지우는 것이다
+  if (flag.inverted) on = !on
   if (on) {
     const { error } = await supabase
       .from('yt_watches')
@@ -2079,6 +2273,15 @@ app.post('/api/settings/trending', requireAuth, async (req, res) => {
 app.post('/api/settings/prospect', requireAuth, async (req, res) => {
   try {
     res.json(await toggleSetting('prospect', req.body?.on))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 🔥 HOT 주간 탐사 (일요일 저녁). 기본 on.
+app.post('/api/settings/hot-weekly', requireAuth, async (req, res) => {
+  try {
+    res.json(await toggleSetting('hotWeekly', req.body?.on))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2502,6 +2705,117 @@ app.get('/api/picks', requireAuth, async (req, res) => {
   }
 })
 
+// 🔥 HOT — 세 칸. 감시망 안 데이터로 만드는 칸은 할당량을 쓰지 않는다.
+app.get('/api/hot', requireAuth, async (req, res) => {
+  try {
+    const { chans, trends } = await channelContext()
+    const overrides = await formatOverrides()
+    const watched = await watchedChannelIds()
+    const decorate = (v) => ({
+      ...v,
+      format: effectiveFormat(v, overrides),
+      ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id))
+    })
+
+    // 1) 🔥 지금 뜨는 주제 — 최근 90일 중 배율·침투 상위 (감시망 안, 무료)
+    const since = new Date(Date.now() - HOT.TRENDING_DAYS * DAY).toISOString()
+    const { data: recent } = await supabase
+      .from('yt_videos').select('*')
+      .gte('published_at', since).gte('score', 0)
+      .gte('multiple', HOT.TRENDING_MIN_MULT)
+      .order('multiple', { ascending: false }).limit(300)
+
+    const trending = rescoreByTier((recent ?? []).map(decorate))
+    attachGrades(trending)
+    trending.sort((a, b) => b.dig_score - a.dig_score)
+    const trendingOut = hidePicked(trending, req).slice(0, HOT.TOP)
+
+    // 2)·3) 탐사로 걸린 것들 (감시망 밖)
+    const { data: found } = await supabase
+      .from('yt_videos').select('*')
+      .like('source', 'hot:%')
+      .order('views', { ascending: false }).limit(500)
+    const hot = (found ?? []).map(decorate)
+      .filter((v) => !watched.has(v.channel_id))
+      .filter((v) => HOT.FORMATS.includes(v.format))
+
+    // 2) 📺 추천 채널 — 영상이 아니라 채널 단위로 묶는다
+    const byChannel = new Map()
+    for (const v of hot) {
+      if (!v.channel_id) continue
+      if (!byChannel.has(v.channel_id)) byChannel.set(v.channel_id, [])
+      byChannel.get(v.channel_id).push(v)
+    }
+    const channels = [...byChannel.entries()].map(([id, vids]) => {
+      const sorted = vids.sort((a, b) => Number(b.views ?? 0) - Number(a.views ?? 0))
+      const subs = Number(chans.get(id)?.subscriber_count ?? 0)
+      return {
+        channel_id: id,
+        channel_title: sorted[0].channel_title,
+        subscriber_count: subs,
+        reach: subs > 0 ? Number((Number(sorted[0].views ?? 0) / subs).toFixed(2)) : null,
+        found: vids.length,
+        global: sorted.some((v) => String(v.source).startsWith('hot:global')),
+        hits: sorted.slice(0, 2).map((v) => ({
+          video_id: v.video_id, title: v.title, views: Number(v.views ?? 0)
+        }))
+      }
+    })
+      .filter((c) => (c.reach ?? 0) >= HOT.OUTLIER_REACH ||
+        Number(c.hits[0]?.views ?? 0) >= HOT.OUTLIER_VIEWS)
+      .sort((a, b) => (b.reach ?? 0) - (a.reach ?? 0))
+      .slice(0, HOT.TOP)
+
+    // 3) 🌍 해외 광맥 — 아웃라이어만. 같은 주제를 국내에서 이미 몇 곳이 다뤘는지 붙인다.
+    const globalRows = hot
+      .filter((v) => String(v.source).startsWith('hot:global:'))
+      .filter((v) => (v.reach ?? 0) >= HOT.OUTLIER_REACH ||
+        Number(v.views ?? 0) >= HOT.OUTLIER_VIEWS)
+      .map((v) => ({ ...v, hot_term: String(v.source).split(':')[2] ?? '' }))
+
+    // 국내 커버리지는 '영상별' 이 아니라 '검색어별' 로 한 번만 잰다 (같은 말로 찾은 것들이라)
+    const terms = [...new Set(globalRows.map((v) => v.hot_term).filter(Boolean))]
+    const coverage = new Map()
+    if (terms.length > 0) {
+      const payload = terms.map((t) => ({ video_id: t, channel_id: null, keyword: t }))
+      const { data: sat } = await supabase.rpc('topic_saturation', {
+        payload, window_days: METRIC.SATURATION_WINDOW_D
+      })
+      for (const r of sat ?? []) coverage.set(r.video_id, Number(r.channels ?? 0))
+    }
+    for (const v of globalRows) v.kr_coverage = coverage.get(v.hot_term) ?? null
+
+    // 국내에서 덜 다뤄진 것부터 (겹치지 않는 광맥이 먼저 보이게)
+    globalRows.sort((a, b) =>
+      (a.kr_coverage ?? 99) - (b.kr_coverage ?? 99) || Number(b.views ?? 0) - Number(a.views ?? 0))
+
+    const lastHotAt = (found ?? []).reduce(
+      (max, v) => (v.first_seen_at > max ? v.first_seen_at : max), '')
+
+    res.json({
+      trending: trendingOut,
+      channels,
+      global: hidePicked(globalRows, req).slice(0, HOT.TOP),
+      last_prospect_at: lastHotAt || null,
+      cost: hotCost(),
+      pairs: HOT_KEYWORD_PAIRS.slice(0, HOT.EN_TERMS).map(([ko, en]) => ({ ko, en }))
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 🔥 지금 탐사 — 국내·해외 검색을 지금 돌린다 (비싸다: 검색 1건당 100유닛)
+app.post('/api/hot/prospect', requireAuth, async (req, res) => {
+  try {
+    const { kr = true, global = true } = req.body ?? {}
+    const report = await prospectHot({ kr, global })
+    if (!sentQuotaAbort(res, report)) res.json(report)
+  } catch (err) {
+    sendYtError(res, err)
+  }
+})
+
 // 🤖 예심 — 지금 기준으로 다시 돌린다. ?dry=1 이면 세어만 보고 DB 는 안 건드린다.
 app.post('/api/audition', requireAuth, async (req, res) => {
   try {
@@ -2885,6 +3199,9 @@ async function estimateDailyUnits() {
     '새 광맥 탐사': settings.prospectOn ? keywords.length * 101 * CYCLES_PER_DAY : 0
   }
 
+  // 🔥 HOT 탐사도 주 1회라 하루치로 나눠 본다
+  if (settings.hotWeeklyOn) by['HOT 주간 탐사'] = Math.ceil(hotCost() / 7)
+
   // 댓글은 주 1회라 하루치로 나눠 본다
   if (await commentsTableReady()) {
     let picks = 0
@@ -3006,5 +3323,16 @@ app.listen(PORT, () => {
   // 담아 둔 영상의 댓글은 주 1회만 갱신한다 (월요일 04:00, 영상 1건당 1유닛)
   cron.schedule('0 4 * * 1', () => {
     refreshPickComments().catch((err) => console.error('[comments] 주간 갱신 실패:', err.message))
+  }, { timezone: COLLECT_TZ })
+
+  // 🔥 HOT 탐사 — 일요일 저녁 한 번 (기본 on, 감시 관리에서 끌 수 있다)
+  cron.schedule(HOT_CRON, async () => {
+    try {
+      const { hotWeeklyOn } = await readSettings()
+      if (!hotWeeklyOn) return console.log('[hot] 주간 탐사가 꺼져 있어 건너뜁니다')
+      await prospectHot()
+    } catch (err) {
+      console.error('[hot] 주간 탐사 실패:', err.message)
+    }
   }, { timezone: COLLECT_TZ })
 })
