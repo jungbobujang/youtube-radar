@@ -587,6 +587,25 @@ function saturationChip(v) {
 // 배수는 소수 1자리, 100 이상은 축약(x1.2천)해 뱃지 폭을 일정하게 둔다
 const ratio = (n) => (Number(n) >= 100 ? shortNum(n) : Number(n || 0).toFixed(1))
 
+// 채널 활력 — 자기 과거 대비. 구독자 수와 무관하다.
+// 쇠락(<0.5)과 상승(>=1.5)만 표시하고 그 사이나 표본 부족은 아무것도 그리지 않는다.
+function trendTip(v) {
+  const base = '채널 활력 = 최근 90일 조회 중앙값 vs 이전 90일'
+  if (v.vitality_recent == null) return base
+  const n = v.vitality_n ? ` · 영상 ${v.vitality_n[0]}편 vs ${v.vitality_n[1]}편` : ''
+  return `${base}\n최근 ${shortNum(v.vitality_recent)} vs 이전 ${shortNum(v.vitality_prev)}${n}`
+}
+
+function trendChip(v) {
+  if (v.dead_channel) {
+    return `<span class="m m-warn" title="${trendTip(v)}">⚠️ 쇠락 ${Number(v.vitality).toFixed(2)}x</span>`
+  }
+  if (v.rising_channel) {
+    return `<span class="m m-good" title="${trendTip(v)}">📈 상승 ${Number(v.vitality).toFixed(2)}x</span>`
+  }
+  return ''
+}
+
 // 지금 목록의 분포에서 상위 25% / 하위 25% 를 등급으로 병기한다.
 // 표본이 적으면 서버가 등급을 비워 보내고, 그때는 숫자만 나온다.
 const GRADE_LABEL = { great: 'Great', normal: 'Normal', low: 'Low' }
@@ -609,7 +628,7 @@ function metricBadges(v) {
     ${v.debate ? '<span class="m m-debate">🗣️ 토론형</span>' : ''}
     ${evergreenChip(v)}
     ${saturationChip(v)}
-    ${v.dead_channel ? `<span class="m m-dead" title="채널 활력(최근 90일 중앙값/구독자)이 같은 체급 중앙값의 절반 이하">⚠️ 활력 낮음</span>` : ''}
+    ${trendChip(v)}
   </span>`
 }
 

@@ -313,9 +313,11 @@ const METRIC = {
   ENGAGE_DIVISOR: 5,      // 참여율이 점수에 기여하는 정도 (클수록 영향 작아짐)
   PER_CHANNEL_CAP: 3,     // 발굴 목록에서 한 채널이 차지할 수 있는 최대 개수
   COMMENT_WEIGHT: 3,      // 댓글 1개를 좋아요 몇 개로 볼지
-  DEAD_VS_TIER: 0.5,      // 같은 체급 활력 중앙값의 이 배 이하 (⚠️ 1차 조건)
-  DEAD_ABS: 0.05,         // 그리고 절대 활력도 이 아래 (⚠️ 2차 조건 · AND)
-  VITALITY_MIN_CH: 4,     // 체급에 채널이 이만큼은 있어야 활력 기준을 세운다
+  TREND_WINDOW_D: 90,     // 채널 활력 한 구간 길이(일). 최근 N일 vs 그 이전 N일
+  TREND_MIN_SAMPLE: 5,    // 각 구간에 영상이 이만큼은 있어야 판정한다
+  TREND_DECLINE: 0.5,     // 이 아래면 ⚠️ 쇠락
+  TREND_RISE: 1.5,        // 이 위면 📈 상승
+  TREND_TTL_MIN: 60,      // 활력 계산 캐시 유지(분). 채널 추세는 시간 단위로 안 변한다
   REACH_PCT_FLOOR: 0.25,  // 발굴점수의 침투력 항 하한 (0 이면 최하위가 점수를 0으로 만든다)
   HOT_ENGAGE_PCTL: 0.75,  // 참여율 상위 25% 에 💬 진한반응
   CHANNEL_TTL_H: 24,      // 구독자 수 갱신 주기(시간)
@@ -356,32 +358,83 @@ function median(sorted) {
   return sorted.length % 2 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2
 }
 
-// 체급별 활력(최근 중앙값/구독자) 중앙값. 화면에 뭐가 떠 있든 흔들리지 않게
-// 영상이 아니라 채널 전체를 모집단으로 쓴다.
-function vitalityBaselines(chans) {
-  const byTier = new Map()
-  for (const c of chans.values()) {
-    const subs = Number(c.subscriber_count ?? 0)
-    const med = Number(c.recent_median_views ?? 0)
-    const tier = subTier(subs)
-    if (!tier || !(med > 0)) continue
-    if (!byTier.has(tier)) byTier.set(tier, [])
-    byTier.get(tier).push(med / subs)
+// ---------------------------------------------------------------- 채널 활력
+//
+// 활력 = 최근 90일 조회 중앙값 ÷ 그 이전 90일 조회 중앙값.
+//
+// 예전 정의는 "최근 중앙값 ÷ 구독자수" 였다. 그 식은 방송사 아카이브 채널을
+// 상시로 ⚠️ 로 만든다. EBS 는 구독자가 543만이라 무엇을 올려도 비율이 바닥이지
+// 채널이 죽은 게 아니다. 자기 과거와 견주면 "요즘 성적이 떨어지고 있나" 라는
+// 원래 물음에 그대로 답할 수 있고, 채널 크기와도 무관해진다.
+let trendCache = { at: 0, map: new Map() }
+
+function invalidateTrends() {
+  trendCache = { at: 0, map: new Map() }
+}
+
+async function channelTrends() {
+  if (trendCache.map.size > 0 && Date.now() - trendCache.at < METRIC.TREND_TTL_MIN * 60e3) {
+    return trendCache.map
   }
 
-  const out = new Map()
-  for (const [tier, arr] of byTier) {
-    // 표본이 적으면 기준을 세우지 않는다. 없으면 경고를 아예 띄우지 않는다 —
-    // 근거 없는 ⚠️ 보다 조용한 편이 낫다.
-    if (arr.length < METRIC.VITALITY_MIN_CH) continue
-    out.set(tier, median(arr.sort((a, b) => a - b)))
+  const win = METRIC.TREND_WINDOW_D * DAY
+  const mid = Date.now() - win
+  const since = new Date(Date.now() - 2 * win).toISOString()
+
+  // 180일치를 한 번에 훑는다. PostgREST 기본 상한(1000행)에 조용히 잘리지 않게 페이지로 나눈다.
+  const PAGE_SIZE = 1000
+  const rows = []
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('yt_videos')
+      .select('channel_id, published_at, views')
+      .gte('published_at', since)
+      .not('channel_id', 'is', null)
+      .order('published_at', { ascending: false })
+      .range(from, from + PAGE_SIZE - 1)
+    if (error) {
+      console.warn(`[metric] 채널 활력 계산 실패: ${error.message}`)
+      return trendCache.map // 이전 값이라도 쓴다 (없으면 빈 맵 → 표시 안 함)
+    }
+    rows.push(...(data ?? []))
+    if (!data || data.length < PAGE_SIZE) break
   }
-  return out
+
+  const buckets = new Map()
+  for (const r of rows) {
+    const t = new Date(r.published_at).getTime()
+    if (!Number.isFinite(t)) continue
+    if (!buckets.has(r.channel_id)) buckets.set(r.channel_id, { recent: [], prev: [] })
+    const b = buckets.get(r.channel_id)
+    ;(t >= mid ? b.recent : b.prev).push(Number(r.views ?? 0))
+  }
+
+  const map = new Map()
+  for (const [id, b] of buckets) {
+    const recentMed = median(b.recent.sort((a, c) => a - c))
+    const prevMed = median(b.prev.sort((a, c) => a - c))
+    // 어느 한쪽이라도 표본이 모자라면 판정 보류. 이전 중앙값이 0 이면 비율을 못 낸다.
+    const enough =
+      b.recent.length >= METRIC.TREND_MIN_SAMPLE &&
+      b.prev.length >= METRIC.TREND_MIN_SAMPLE &&
+      prevMed > 0
+
+    map.set(id, {
+      recent_median: recentMed,
+      prev_median: prevMed,
+      recent_n: b.recent.length,
+      prev_n: b.prev.length,
+      ratio: enough ? recentMed / prevMed : null
+    })
+  }
+
+  trendCache = { at: Date.now(), map }
+  return map
 }
 
 async function channelContext() {
-  const chans = await channelMap()
-  return { chans, vitality: vitalityBaselines(chans) }
+  const [chans, trends] = await Promise.all([channelMap(), channelTrends()])
+  return { chans, trends }
 }
 
 // 같은 체급 안에서의 백분위(0~1). 동점은 중간 순위로 본다.
@@ -425,18 +478,17 @@ function rescoreByTier(rows) {
   return rows
 }
 
-function deriveMetrics(v, channel, baselines) {
+function deriveMetrics(v, channel, trend) {
   const views = Number(v.views ?? 0)
   const likes = Number(v.like_count ?? 0)
   const comments = Number(v.comment_count ?? 0)
   const subs = Number(channel?.subscriber_count ?? 0)
-  const recentMedian = Number(channel?.recent_median_views ?? 0)
 
   const reach = subs > 0 ? views / subs : null                 // 침투력
   const engage = views > 0
     ? ((likes + comments * METRIC.COMMENT_WEIGHT) / views) * 100
     : 0                                                        // 참여율 %
-  const vitality = subs > 0 ? recentMedian / subs : null       // 채널활력
+  const vitality = trend?.ratio ?? null                        // 채널활력 (최근 90일 ÷ 이전 90일)
   const multiple = Number(v.multiple ?? 0)
 
   // 토론성 — 좋아요 대비 댓글. 참여율(💬 진한반응)과는 다른 축이다.
@@ -453,26 +505,21 @@ function deriveMetrics(v, channel, baselines) {
 
   const tier = subTier(subs)
 
-  // 활력 경고: 같은 체급 중앙값의 절반 이하 **그리고** 절대값도 바닥일 때만.
-  //
-  // 체급 상대평가만 쓰면 새 오탐이 생긴다. 실측 예: '어른의 지혜' 는 활력 0.174
-  // (구독자의 17% 가 최근 영상을 본다 — 절대적으로 건강하다) 인데, ~5만 체급이
-  // 워낙 활발해서(중앙값 0.79) 절반 기준에 걸린다. 그래서 절대 기준과 AND 로 묶었다.
-  // 순수 체급 기준으로 되돌리려면 뒤 조건 한 줄만 빼면 된다.
-  const base = tier && baselines ? baselines.get(tier) : null
-  const dead = vitality != null && base != null &&
-    vitality <= base * METRIC.DEAD_VS_TIER &&
-    vitality < METRIC.DEAD_ABS
-
+  // 활력은 자기 과거와의 비교라 채널 크기와 무관하다. 체급 보정이 필요 없다.
+  // 표본이 모자라면(어느 한쪽 구간 영상 5개 미만) ratio 가 null 이고 아무것도 표시하지 않는다.
   return {
     reach: reach == null ? null : Number(reach.toFixed(2)),
     engage: Number(engage.toFixed(2)),
-    vitality: vitality == null ? null : Number(vitality.toFixed(4)),
+    vitality: vitality == null ? null : Number(vitality.toFixed(2)),
+    vitality_pending: vitality == null,
+    vitality_recent: trend?.recent_median ?? null,
+    vitality_prev: trend?.prev_median ?? null,
+    vitality_n: trend ? [trend.recent_n, trend.prev_n] : null,
     dig_score: Number(digScore.toFixed(2)),
     tier,
     tier_label: tier ? TIER_LABEL.get(tier) : null,
-    vitality_base: base == null ? null : Number(base.toFixed(4)),
-    dead_channel: dead,
+    dead_channel: vitality != null && vitality < METRIC.TREND_DECLINE,
+    rising_channel: vitality != null && vitality >= METRIC.TREND_RISE,
     debate_ratio: debate == null ? null : Number(debate.toFixed(3)),
     debate: debate != null && debate >= METRIC.DEBATE_RATIO
   }
@@ -1020,6 +1067,7 @@ async function collect() {
   }
 
   addUnitsToday(report.units)
+  invalidateTrends() // 새 영상이 들어왔으니 다음 조회 때 활력을 다시 계산한다
 
   lastRun = {
     at: new Date().toISOString(),
@@ -1167,10 +1215,10 @@ async function relatedFromDb(keyword, excludeId) {
     .limit(200)
   if (error) throw error
 
-  const { chans, vitality } = await channelContext()
+  const { chans, trends } = await channelContext()
   const rows = (data ?? [])
     .filter((v) => v.video_id !== excludeId)
-    .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+    .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id)) }))
 
   return rescoreByTier(rows)
     .sort((a, b) => b.dig_score - a.dig_score)
@@ -1315,13 +1363,13 @@ app.get('/api/dig', requireAuth, async (req, res) => {
     const { data, error } = await q
     if (error) throw error
 
-    const { chans, vitality } = await channelContext()
+    const { chans, trends } = await channelContext()
     const overrides = await formatOverrides()
     const rows = (data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
       .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
       .filter((v) => format === 'all' || v.format === format)
-      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id)) }))
 
     // 발굴점수의 침투력 항을 체급 백분위로 갈아끼운다 (정렬 기준이라 줄 세우기 전에)
     rescoreByTier(rows)
@@ -1393,13 +1441,13 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
       .limit(300)
     if (error) throw error
 
-    const { chans, vitality } = await channelContext()
+    const { chans, trends } = await channelContext()
     const overrides = await formatOverrides()
     const all = (data ?? [])
       .filter((v) => passesSubFilter(v, chans, subs))
       .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
       .filter((v) => format === 'all' || v.format === format)
-      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+      .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id)) }))
 
     rescoreByTier(all)
 
@@ -1545,9 +1593,9 @@ app.get('/api/starred', requireAuth, async (req, res) => {
       .order('starred_at', { ascending: false })
       .limit(200)
     if (error) throw error
-    const { chans, vitality } = await channelContext()
+    const { chans, trends } = await channelContext()
     const rows = rescoreByTier(
-      (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), vitality) }))
+      (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id)) }))
     )
 
     attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
@@ -1564,12 +1612,12 @@ app.get('/api/starred', requireAuth, async (req, res) => {
 async function weeklyReport() {
   const since = new Date(Date.now() - 7 * DAY).toISOString()
 
-  const { chans, vitality } = await channelContext()
+  const { chans, trends } = await channelContext()
   const overrides = await formatOverrides()
   const decorate = (v) => ({
     ...v,
     format: effectiveFormat(v, overrides),
-    ...deriveMetrics(v, chans.get(v.channel_id), vitality)
+    ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id))
   })
 
   // a. 지난 7일 신작 중 성과 상위 — 배율 우선, 같으면 조회수
