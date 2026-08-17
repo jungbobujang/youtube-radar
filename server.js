@@ -1324,6 +1324,15 @@ app.get('/api/discover', requireAuth, async (req, res) => {
   }
 })
 
+// 담아 둔 영상(pick_level >= 1)을 목록에서 뺀다.
+// ?picked=1 이면 그대로 두고(⭐ 포함 보기), 컬럼이 아직 없으면 아무것도 하지 않는다.
+// 이관 전 행은 pick_level 이 null 일 수 있어 null 도 '안 담김' 으로 본다.
+async function excludePicked(query, req) {
+  if (req.query.picked === '1') return query
+  if (!(await pickColumnsReady())) return query
+  return query.or('pick_level.is.null,pick_level.eq.0')
+}
+
 // 💎 발굴 — 채널 중앙값 대비 배율이 높은 과거 영상
 app.get('/api/dig', requireAuth, async (req, res) => {
   try {
@@ -1353,6 +1362,8 @@ app.get('/api/dig', requireAuth, async (req, res) => {
       .gte('score', 0)
       .order('multiple', { ascending: false })
       .limit(600)
+    // 담아 둔 영상은 기본으로 빠진다. 같은 걸 두 번 검토하지 않기 위해서다.
+    q = await excludePicked(q, req)
     if (channel !== 'all') q = q.eq('channel_id', channel)
     if (group !== 'all') {
       const ids = await groupChannelIds(group)
@@ -1431,7 +1442,7 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
     if (ids.length === 0) return res.json([])
 
     const since = new Date(Date.now() - 30 * 864e5).toISOString()
-    const { data, error } = await supabase
+    let q = supabase
       .from('yt_videos')
       .select('*')
       .in('channel_id', ids)
@@ -1439,6 +1450,9 @@ app.get('/api/fresh', requireAuth, async (req, res) => {
       .gte('score', 0)
       .order('published_at', { ascending: false })
       .limit(300)
+    q = await excludePicked(q, req)
+
+    const { data, error } = await q
     if (error) throw error
 
     const { chans, trends } = await channelContext()
@@ -1568,31 +1582,216 @@ app.post('/api/settings/trending', requireAuth, async (req, res) => {
   }
 })
 
-// ⭐ 즐겨찾기
+// ---------------------------------------------------------------- 후보 관리함
+//
+// 0 = 없음 / 1 = ⭐ 후보 / 2 = ❤️ 확정.
+// 담는 순간 발굴·신작 목록에서 빠져 같은 영상을 두 번 검토하지 않는다.
+const PICK_LEVELS = [0, 1, 2]
+const TARGETS = ['A', 'B', 'C', 'D', 'E']
+
+// 용도는 출처 채널이 속한 그룹 이름으로 추정한다. 못 맞히면 null(미지정)로 두고
+// 사용자가 칩으로 직접 고른다.
+const TARGET_BY_GROUP = [
+  [/시사|뉴스/, 'A'],
+  [/쉬는\s*시간|잡학/, 'B'],
+  [/지식\s*에세이|에세이/, 'D']
+]
+
+// 컬럼이 아직 없으면(SQL 미실행) 후보 기능만 조용히 비활성화한다.
+// 이걸 안 걸면 pick_level 필터가 들어간 발굴·신작이 통째로 500 이 된다.
+let pickReady = null
+
+async function pickColumnsReady() {
+  if (pickReady !== null) return pickReady
+  const { error } = await supabase.from('yt_videos').select('pick_level, target_group').limit(1)
+  pickReady = !error
+  if (!pickReady) {
+    console.warn(`[pick] 후보 컬럼이 아직 없습니다 (TODO-SQL.md 참고): ${error.message}`)
+  }
+  return pickReady
+}
+
+let targetCache = { at: 0, map: new Map() }
+
+// 채널 id -> 추정 용도. 그룹 편성은 자주 바뀌지 않으니 30분 캐시.
+async function channelTargets() {
+  if (targetCache.map.size > 0 && Date.now() - targetCache.at < 30 * 60e3) return targetCache.map
+
+  const [groups, links, watches] = await Promise.all([
+    supabase.from('yt_groups').select('id, name'),
+    supabase.from('yt_watch_groups').select('watch_id, group_id'),
+    supabase.from('yt_watches').select('id, value').eq('type', 'channel')
+  ])
+
+  const letterOf = new Map()
+  for (const g of groups.data ?? []) {
+    const hit = TARGET_BY_GROUP.find(([re]) => re.test(g.name ?? ''))
+    if (hit) letterOf.set(g.id, hit[1])
+  }
+
+  // 한 채널이 여러 그룹에 속하면 먼저 걸리는 쪽을 쓴다
+  const byWatch = new Map()
+  for (const l of links.data ?? []) {
+    const letter = letterOf.get(l.group_id)
+    if (letter && !byWatch.has(l.watch_id)) byWatch.set(l.watch_id, letter)
+  }
+
+  const map = new Map()
+  for (const w of watches.data ?? []) {
+    const letter = byWatch.get(w.id)
+    if (letter) map.set(w.value, letter)
+  }
+  targetCache = { at: Date.now(), map }
+  return map
+}
+
+app.post('/api/pick', requireAuth, async (req, res) => {
+  try {
+    if (!(await pickColumnsReady())) {
+      return res.status(503).json({
+        error: '후보함 컬럼이 아직 없어요. TODO-SQL.md 의 SQL 을 먼저 실행해 주세요'
+      })
+    }
+
+    const { video_id, level, target_group } = req.body ?? {}
+    if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
+
+    const patch = {}
+    if (level !== undefined) {
+      const lv = Number(level)
+      if (!PICK_LEVELS.includes(lv)) return res.status(400).json({ error: '레벨을 확인해 주세요' })
+      patch.pick_level = lv
+      // 옛 starred 컬럼도 같이 맞춰 둔다 (이관 전 데이터와 섞이지 않게)
+      patch.starred = lv >= 1
+      patch.starred_at = lv >= 1 ? new Date().toISOString() : null
+    }
+    if (target_group !== undefined) {
+      if (target_group !== null && !TARGETS.includes(target_group)) {
+        return res.status(400).json({ error: '용도를 확인해 주세요' })
+      }
+      patch.target_group = target_group
+    }
+    if (Object.keys(patch).length === 0) {
+      return res.status(400).json({ error: '바꿀 내용이 없어요' })
+    }
+
+    // 처음 담을 때 용도가 비어 있으면 채널 그룹에서 추정해 채운다
+    if (patch.pick_level >= 1 && patch.target_group === undefined) {
+      const { data: cur } = await supabase
+        .from('yt_videos').select('channel_id, target_group').eq('video_id', video_id).single()
+      if (cur && !cur.target_group) {
+        const guess = (await channelTargets()).get(cur.channel_id)
+        if (guess) patch.target_group = guess
+      }
+    }
+
+    const { data, error } = await supabase
+      .from('yt_videos').update(patch).eq('video_id', video_id)
+      .select('video_id, pick_level, target_group, starred_at').single()
+    if (error) throw error
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 옛 이름. 북마크나 캐시된 화면이 아직 부를 수 있어 남겨 둔다.
 app.post('/api/star', requireAuth, async (req, res) => {
   try {
     const { video_id, starred } = req.body ?? {}
     if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
-    const { error } = await supabase
-      .from('yt_videos')
-      .update({ starred: !!starred, starred_at: starred ? new Date().toISOString() : null })
-      .eq('video_id', video_id)
-    if (error) throw error
+
+    if (await pickColumnsReady()) {
+      const { error } = await supabase
+        .from('yt_videos')
+        .update({
+          pick_level: starred ? 1 : 0,
+          starred: !!starred,
+          starred_at: starred ? new Date().toISOString() : null
+        })
+        .eq('video_id', video_id)
+      if (error) throw error
+    } else {
+      const { error } = await supabase
+        .from('yt_videos')
+        .update({ starred: !!starred, starred_at: starred ? new Date().toISOString() : null })
+        .eq('video_id', video_id)
+      if (error) throw error
+    }
     res.json({ ok: true })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
 })
 
+// 🗂 후보함 — 담아 둔 것 전부. ❤️ 확정이 먼저, 그다음 담은 날짜 역순.
+app.get('/api/picks', requireAuth, async (req, res) => {
+  try {
+    const ready = await pickColumnsReady()
+    const { level = 'all', target = 'all' } = req.query
+
+    let q = supabase.from('yt_videos').select('*')
+    if (ready) {
+      q = q.gte('pick_level', 1)
+      if (level === '1' || level === '2') q = q.eq('pick_level', Number(level))
+      if (target === 'none') q = q.is('target_group', null)
+      else if (TARGETS.includes(target)) q = q.eq('target_group', target)
+    } else {
+      q = q.eq('starred', true) // 컬럼 이관 전에는 옛 즐겨찾기를 그대로 보여준다
+    }
+
+    const { data, error } = await q.order('starred_at', { ascending: false }).limit(300)
+    if (error) throw error
+
+    const { chans, trends } = await channelContext()
+    const rows = rescoreByTier(
+      (data ?? []).map((v) => ({
+        ...v,
+        pick_level: Number(v.pick_level ?? (v.starred ? 1 : 0)),
+        ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id))
+      }))
+    ).sort((a, b) =>
+      b.pick_level - a.pick_level ||
+      new Date(b.starred_at ?? 0) - new Date(a.starred_at ?? 0))
+
+    attachEvergreen(rows, await velocityMap(rows.map((v) => v.video_id)))
+    await attachSaturation(rows)
+
+    // 요약은 화면 필터와 무관하게 담아 둔 것 전체 기준으로 센다
+    const summary = { total: 0, candidate: 0, confirmed: 0, by_target: { none: 0 } }
+    for (const t of TARGETS) summary.by_target[t] = 0
+
+    if (ready) {
+      const { data: all } = await supabase
+        .from('yt_videos').select('pick_level, target_group').gte('pick_level', 1).limit(2000)
+      for (const r of all ?? []) {
+        summary.total++
+        if (Number(r.pick_level) >= 2) summary.confirmed++
+        else summary.candidate++
+        summary.by_target[r.target_group && TARGETS.includes(r.target_group) ? r.target_group : 'none']++
+      }
+    } else {
+      summary.total = rows.length
+      summary.candidate = rows.length
+      summary.by_target.none = rows.length
+    }
+
+    res.json({ rows, summary, ready })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 옛 이름 — 배열만 돌려주던 시절의 호출을 위해 남겨 둔다
 app.get('/api/starred', requireAuth, async (req, res) => {
   try {
-    const { data, error } = await supabase
-      .from('yt_videos')
-      .select('*')
-      .eq('starred', true)
-      .order('starred_at', { ascending: false })
-      .limit(200)
+    const ready = await pickColumnsReady()
+    let q = supabase.from('yt_videos').select('*')
+    q = ready ? q.gte('pick_level', 1) : q.eq('starred', true)
+
+    const { data, error } = await q.order('starred_at', { ascending: false }).limit(200)
     if (error) throw error
+
     const { chans, trends } = await channelContext()
     const rows = rescoreByTier(
       (data ?? []).map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id)) }))

@@ -157,6 +157,24 @@
   }
   .star:hover { color: #d99a1b; }
   .star-on { color: #d99a1b; }
+  .heart {
+    background: none; border: none; padding: 0 3px; flex: none;
+    font-size: 15px; line-height: 1; filter: grayscale(1); opacity: .55;
+  }
+  .heart:hover, .heart-on { filter: none; opacity: 1; }
+
+  /* 용도 태그 A~E */
+  /* 지표 스트립 안에 함께 흐른다 (밖에 두면 제목 칸을 밀어낸다) */
+  .tchips { display: inline-flex; gap: 3px; align-items: center; flex: none; margin-right: 2px; }
+  .tchip {
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink-faint);
+    border-radius: 999px; min-width: 24px; padding: 2px 7px;
+    font-size: 11px; font-weight: 700; line-height: 1.5;
+  }
+  .tchip:hover { border-color: var(--ink-faint); color: var(--ink-soft); }
+  .tchip-on { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .tchip-none { background: #f1efe8; color: var(--ink-faint); }
+  .toast { margin: 0 0 8px; }
   .rel { flex: none; white-space: nowrap; }
 
   .relpanel {
@@ -294,17 +312,25 @@
     /* 체크박스는 라벨 전체가 누르는 자리다. 라벨을 44px 로 키운다. */
     .cat { min-height: 44px; }
     .cat input { width: 20px; height: 20px; }
-    .tools .btn-sm, .tools .star {
+    .tools .btn-sm, .tools .star, .tools .heart {
       flex: none; min-width: 44px; min-height: 44px;
       display: inline-flex; align-items: center; justify-content: center;
     }
     .tools .star { font-size: 22px; padding: 0 8px; }
+    .tools .heart { font-size: 18px; padding: 0 8px; }
+    .tchip { min-width: 44px; min-height: 44px; font-size: 14px; }
 
     /* 버튼이 44px 로 커진 만큼 제목이 밀린다. 라벨을 떼고 지표 폭을 줄여
        제목이 볼 자리를 되찾는다 (라벨은 title 속성에 남아 있다). */
     .lbl { display: none; }
     .tools { flex: 0 1 auto; min-width: 0; }
-    .metrics { flex: 0 1 auto; max-width: 260px; }
+    /* 후보함 행은 버튼이 4개(💡★🤍🔎)라 지표 폭을 더 줄여야 제목이 산다.
+       flex-end 인 채로 넘치면 앞쪽이 왼쪽으로 잘려 스크롤로도 닿지 않는다 → flex-start. */
+    .metrics { flex: 0 1 auto; max-width: 200px; overflow-x: auto; flex-wrap: nowrap;
+               justify-content: flex-start;
+               scrollbar-width: none; -webkit-overflow-scrolling: touch; }
+    .metrics::-webkit-scrollbar { display: none; }
+    .metrics > .m, .metrics > .tchips { flex: none; }
   }
 
   /* ---------------------------------------------------------------- 모바일 (~640px)
@@ -436,6 +462,11 @@ let digSort = 'dig'
 let digGroup = 'all'
 let digSubs = 'all'
 let digFormat = 'long' // 주력이 롱폼이라 기본값
+let showPicked = false // 담아 둔 영상을 목록에 포함할지 (기본 off)
+let pickLevel = 'all'  // 후보함 필터: all / 1(⭐) / 2(❤️)
+let pickTarget = 'all' // 후보함 용도 필터: all / A~E / none
+
+const TARGETS = ['A', 'B', 'C', 'D', 'E']
 
 const SUB_OPTS = [['all', '구독자 전체'], ['small', '~5만'], ['mid', '5~30만'], ['large', '30만+']]
 const FMT_OPTS = [['long', '롱폼'], ['mid', '미드(1~3분)'], ['shorts', '쇼츠'], ['all', '형식 전체']]
@@ -477,7 +508,18 @@ function wireFilters() {
 
 function filterQuery() {
   return `group=${encodeURIComponent(digGroup)}&channel=${encodeURIComponent(digChannel)}`
-    + `&subs=${digSubs}&format=${digFormat}`
+    + `&subs=${digSubs}&format=${digFormat}&picked=${showPicked ? 1 : 0}`
+}
+
+// 담아 둔 영상 포함 토글. 기본은 off — 검토한 건 목록에서 빠져야 다음 것에 집중된다.
+function pickedToggle() {
+  return `<button class="btn-ghost btn-sm ${showPicked ? 'fmt-on' : ''}" id="show-picked"
+    title="담아 둔 영상까지 함께 보기">⭐ 포함 보기</button>`
+}
+
+function wirePickedToggle() {
+  const b = $('#show-picked')
+  if (b) b.onclick = () => { showPicked = !showPicked; render() }
 }
 
 function durLabel(sec) {
@@ -553,6 +595,28 @@ function stateBox(title, desc, action = '') {
   return `<div class="state"><h4>${esc(title)}</h4><p>${esc(desc)}</p>${action}</div>`
 }
 
+// 행 하나가 사라졌을 때 상단 "N건" 을 다시 그리지 않고 숫자만 고친다
+function bumpCount(panel, delta) {
+  const el = panel.querySelector('[data-count]')
+  if (!el) return
+  const next = Math.max(0, Number(el.dataset.count) + delta)
+  el.dataset.count = next
+  el.textContent = `${next}건`
+}
+
+// 실패를 조용히 삼키지 않되 alert 로 막지도 않는다
+function toast(panel, message) {
+  let box = panel.querySelector('.toast')
+  if (!box) {
+    box = document.createElement('p')
+    box.className = 'toast err'
+    panel.prepend(box)
+  }
+  box.textContent = message
+  clearTimeout(box._t)
+  box._t = setTimeout(() => box.remove(), 4000)
+}
+
 // 기본값이 아닌 필터가 하나라도 걸려 있으면 0건일 때 초기화 버튼을 붙인다
 function filtersActive() {
   return digGroup !== 'all' || digChannel !== 'all' || digSubs !== 'all'
@@ -580,9 +644,10 @@ function wireReset(panel) {
 // 모바일에서 1줄(썸네일+제목) / 2줄(지표+버튼)로 접히도록 지표·버튼을 .tools 로 묶는다.
 // 묶어 두지 않으면 폭이 좁아질 때 형제들이 제각각 줄바꿈해 썸네일만 한 줄을 차지한다.
 function videoRow(v, extra = '', opts = {}) {
-  const tools = opts.noTools ? '' : `
-    <button class="star ${v.starred ? 'star-on' : ''}" data-star="${esc(v.video_id)}"
-            aria-label="즐겨찾기" title="즐겨찾기">★</button>
+  const star = opts.tools ?? `
+    <button class="star ${Number(v.pick_level ?? 0) >= 1 ? 'star-on' : ''}" data-star="${esc(v.video_id)}"
+            aria-label="후보로 담기" title="후보로 담기 (목록에서 빠집니다)">★</button>`
+  const tools = opts.noTools ? '' : `${star}
     <button class="btn-ghost btn-sm rel" data-rel="${esc(v.video_id)}" title="관련 주제">
       🔎<span class="lbl"> 관련</span></button>`
   return `<div class="row row-v">
@@ -653,8 +718,11 @@ function reachTip(v) {
   return `${base}\n체급 ${v.tier_label}${pct}`
 }
 
-function metricBadges(v) {
+// extra 는 .metrics 안쪽에 넣는다. 밖에 두면 .tools 의 min-content 가 커져
+// 옆 칸(제목)을 밀어내 0 으로 만든다 (768px 에서 실제로 그렇게 깨졌다).
+function metricBadges(v, extra = '') {
   return `<span class="metrics">
+    ${extra}
     <span class="m" title="채널·형식별 조회수 중앙값 대비 배율">x${ratio(v.multiple)}${gradeTag(v.grade?.multiple)}</span>
     <span class="m" title="${reachTip(v)}">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}${gradeTag(v.grade?.reach)}</span>
     <span class="m" title="(좋아요 + 댓글×3) / 조회수">참여 ${(v.engage ?? 0).toFixed(1)}%${gradeTag(v.grade?.engage)}</span>
@@ -729,27 +797,119 @@ const IDEA_FACE = '💡<span class="lbl"> 아이디어로</span>'
 
 function ideaButton(v) {
   return `<button class="btn-ghost btn-sm idea" title="제목·링크 복사"
-    data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}">${IDEA_FACE}</button>`
+    data-title="${esc(v.title)}" data-vid="${esc(v.video_id)}"
+    data-target="${esc(v.target_group ?? '')}">${IDEA_FACE}</button>`
+}
+
+// ---------------------------------------------------------------- 후보 관리함
+
+// 용도 칩 A~E. 누르면 지정, 이미 켜진 것을 다시 누르면 미지정으로 돌린다.
+function targetChips(v) {
+  const cur = v.target_group ?? null
+  return `<span class="tchips">
+    ${cur ? '' : '<span class="m tchip-none">미지정</span>'}
+    ${TARGETS.map((t) => `
+      <button class="tchip ${cur === t ? 'tchip-on' : ''}"
+        data-target-set="${esc(v.video_id)}|${t}"
+        title="용도 ${t}${cur === t ? ' (다시 누르면 미지정)' : ''}">${t}</button>`).join('')}
+  </span>`
+}
+
+// ⭐ 후보 / ❤️ 확정. ❤️ 를 다시 누르면 ⭐ 로 내린다.
+function pickTools(v) {
+  const lv = Number(v.pick_level ?? 1)
+  return `
+    <button class="star ${lv >= 1 ? 'star-on' : ''}" data-pick="${esc(v.video_id)}|${lv >= 1 ? 0 : 1}"
+      aria-label="후보에서 빼기" title="${lv >= 1 ? '후보에서 빼기' : '후보로 담기'}">★</button>
+    <button class="heart ${lv >= 2 ? 'heart-on' : ''}" data-pick="${esc(v.video_id)}|${lv >= 2 ? 1 : 2}"
+      aria-label="확정" title="${lv >= 2 ? '확정 해제 (⭐ 후보로)' : '❤️ 확정으로 올리기'}">${lv >= 2 ? '❤️' : '🤍'}</button>`
 }
 
 // 목록을 그린 뒤 공통 버튼(⭐ / 🔎 관련 / 아이디어로)을 붙인다
+// 행과 그 아래 붙은 관련주제 패널을 함께 접어 없앤다 (낙관적 업데이트)
+function dropRow(el) {
+  const row = el.closest('.row')
+  if (!row) return null
+  const panel = row.nextElementSibling?.classList.contains('relpanel') ? row.nextElementSibling : null
+  const restore = { row, panel, display: row.style.display }
+  row.style.display = 'none'
+  if (panel) panel.style.display = 'none'
+  return restore
+}
+
+function undropRow(restore) {
+  if (!restore) return
+  restore.row.style.display = restore.display
+  if (restore.panel) restore.panel.style.display = ''
+}
+
 function wireRows(panel) {
+  // 발굴·신작 등 목록의 ★ — 누르면 후보로 담고 그 자리에서 사라진다
   panel.querySelectorAll('[data-star]').forEach((b) => {
     b.onclick = async () => {
-      const on = !b.classList.contains('star-on')
-      b.classList.toggle('star-on', on)
+      const hidden = showPicked ? null : dropRow(b)
+      b.classList.add('star-on')
       try {
-        await api('/api/star', {
+        await api('/api/pick', {
           method: 'POST',
-          body: JSON.stringify({ video_id: b.dataset.star, starred: on })
+          body: JSON.stringify({ video_id: b.dataset.star, level: 1 })
         })
-      } catch { b.classList.toggle('star-on', !on) }
+        bumpCount(panel, -1)
+      } catch (e) {
+        undropRow(hidden)
+        b.classList.remove('star-on')
+        toast(panel, e.message)
+      }
+    }
+  })
+
+  // 후보함의 ⭐/❤️ — data-pick="video_id|목표레벨"
+  panel.querySelectorAll('[data-pick]').forEach((b) => {
+    b.onclick = async () => {
+      const [videoId, next] = b.dataset.pick.split('|')
+      const level = Number(next)
+      const hidden = level === 0 ? dropRow(b) : null
+      try {
+        await api('/api/pick', {
+          method: 'POST', body: JSON.stringify({ video_id: videoId, level })
+        })
+        if (level === 0) bumpCount(panel, -1)
+        else render() // ⭐↔❤️ 는 정렬이 바뀌므로 다시 그린다
+      } catch (e) {
+        undropRow(hidden)
+        toast(panel, e.message)
+      }
+    }
+  })
+
+  // 용도 칩 — 이미 켜진 것을 다시 누르면 미지정으로
+  panel.querySelectorAll('[data-target-set]').forEach((b) => {
+    b.onclick = async () => {
+      const [videoId, letter] = b.dataset.targetSet.split('|')
+      const on = b.classList.contains('tchip-on')
+      const value = on ? null : letter
+      const group = b.parentElement
+      group.querySelectorAll('.tchip').forEach((c) => c.classList.remove('tchip-on'))
+      if (!on) b.classList.add('tchip-on')
+      group.querySelector('.tchip-none')?.remove()
+
+      // 복사 버튼이 쓰는 값도 같이 맞춰 둔다
+      const idea = b.closest('.row')?.querySelector('.idea')
+      if (idea) idea.dataset.target = value ?? ''
+
+      try {
+        await api('/api/pick', {
+          method: 'POST', body: JSON.stringify({ video_id: videoId, target_group: value })
+        })
+      } catch (e) { toast(panel, e.message); render() }
     }
   })
 
   panel.querySelectorAll('.idea').forEach((b) => {
     b.onclick = async () => {
-      const text = `${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}`
+      // 용도가 지정돼 있으면 "[D] 제목 | URL" 로 붙여 넣는다
+      const tag = b.dataset.target ? `[${b.dataset.target}] ` : ''
+      const text = `${tag}${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}`
       try { await navigator.clipboard.writeText(text) } catch {
         const ta = document.createElement('textarea')
         ta.value = text; document.body.appendChild(ta); ta.select()
@@ -844,7 +1004,8 @@ async function render() {
               ${[['all', '전체 (6개월~3년)'], ['6m-1y', '6개월~1년'], ['1y-2y', '1~2년'], ['2y+', '2년 이상']]
                 .map(([v, t]) => `<option value="${v}" ${digPeriod === v ? 'selected' : ''}>${t}</option>`).join('')}
             </select>`)}
-          <span class="muted">${rows.length}건</span>
+          <span class="muted" data-count="${rows.length}">${rows.length}건</span>
+          ${pickedToggle()}
           <button class="btn-ghost btn-sm" id="csv" ${rows.length ? '' : 'disabled'}>⬇️ CSV</button>
         </div>
         ${rows.length ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
@@ -855,19 +1016,51 @@ async function render() {
       wireFilters()
       wireRows(panel)
       wireReset(panel)
+      wirePickedToggle()
       // 화면에 그려진 그대로(=현재 필터·정렬 결과) 내보낸다
       $('#csv').onclick = () => downloadCsv(`youtube-radar-dig-${todayStamp()}.csv`, toCsv(rows))
       return
     }
 
-    if (tab === 'starred') {
-      const rows = await api('/api/starred')
+    if (tab === 'picks') {
+      const { rows, summary, ready } = await api(`/api/picks?level=${pickLevel}&target=${pickTarget}`)
+      const chip = (val, label, n) => `<button class="btn-ghost btn-sm ${pickTarget === val ? 'fmt-on' : ''}"
+        data-ptarget="${val}">${label}${n == null ? '' : ` ${n}`}</button>`
+
       panel.innerHTML = `
-        <p class="muted" style="margin-top:0">⭐ ${rows.length}건</p>
+        ${ready ? '' : `<div class="notice">후보함 컬럼이 아직 없어 옛 즐겨찾기를 그대로 보여주는 중입니다.
+          <b>TODO-SQL.md</b> 의 SQL 을 실행하면 ⭐/❤️ 와 용도 태그가 켜집니다.</div>`}
+        <div class="filters">
+          <div class="fstrip">
+            ${[['all', '전체'], ['1', '⭐ 후보'], ['2', '❤️ 확정']].map(([v, t]) =>
+              `<button class="btn-ghost btn-sm ${pickLevel === v ? 'fmt-on' : ''}" data-plevel="${v}">${t}</button>`).join('')}
+          </div>
+          <span class="muted" data-count="${rows.length}">${rows.length}건</span>
+        </div>
+        <div class="filters">
+          <div class="fstrip">
+            ${chip('all', '용도 전체', summary.total)}
+            ${TARGETS.map((t) => chip(t, t, summary.by_target[t])).join('')}
+            ${chip('none', '미지정', summary.by_target.none)}
+          </div>
+        </div>
+        <p class="muted" style="margin:0 0 8px">
+          ⭐ 후보 ${fmt(summary.candidate)} · ❤️ 확정 ${fmt(summary.confirmed)}
+        </p>
         ${rows.length
-          ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
-          : stateBox('아직 즐겨찾기한 영상이 없어요', '목록에서 ★ 을 눌러 담아 보세요.')}
+          ? rows.map((v) => videoRow(
+              v,
+              metricBadges(v, targetChips(v)) + ideaButton(v),
+              { tools: pickTools(v) }
+            )).join('')
+          : stateBox('여기 담긴 영상이 없어요', '발굴·신작 목록에서 ★ 을 누르면 이리로 옵니다.')}
       `
+      panel.querySelectorAll('[data-plevel]').forEach((b) => {
+        b.onclick = () => { pickLevel = b.dataset.plevel; render() }
+      })
+      panel.querySelectorAll('[data-ptarget]').forEach((b) => {
+        b.onclick = () => { pickTarget = b.dataset.ptarget; render() }
+      })
       wireRows(panel)
       return
     }
@@ -875,7 +1068,10 @@ async function render() {
     if (tab === 'fresh') {
       const rows = await api(`/api/fresh?${filterQuery()}`)
       panel.innerHTML = `
-        <div class="filters">${filterBar()}<span class="muted">${rows.length}건</span></div>
+        <div class="filters">${filterBar()}
+          <span class="muted" data-count="${rows.length}">${rows.length}건</span>
+          ${pickedToggle()}
+        </div>
         ${rows.length
           ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
           : emptyWithReset('최근 30일 영상이 없어요', '감시 채널이 새 영상을 올리면 여기에 쌓입니다.')}
@@ -883,6 +1079,7 @@ async function render() {
       wireFilters()
       wireRows(panel)
       wireReset(panel)
+      wirePickedToggle()
       return
     }
 
@@ -1219,7 +1416,7 @@ async function refreshStatus() {
 function renderTabs() {
   const defs = [
     ['dig', '💎 발굴'],
-    ['starred', '⭐ 모아보기'],
+    ['picks', '🗂 후보함'],
     ['fresh', '📡 신작'],
     ['weekly', '📊 주간'],
     ...(settings.trendingOn ? [['discover', '🔥 급상승']] : []),

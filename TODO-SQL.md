@@ -7,6 +7,57 @@
 
 ---
 
+## 0-A. 🗂 후보 관리함 (v1.3) — **실행 필요**
+
+**상태: 미실행.** 실행 전에도 서버는 정상이고, 후보함은 옛 즐겨찾기를 그대로 보여줍니다
+(⭐/❤️ 와 용도 태그만 잠깁니다. `POST /api/pick` 은 503 으로 안내를 돌려줍니다).
+
+```sql
+-- 픽 레벨: 0 없음 / 1 ⭐ 후보 / 2 ❤️ 확정
+alter table public.yt_videos add column if not exists pick_level int not null default 0;
+
+-- 용도 태그: A~E 또는 null(미지정)
+alter table public.yt_videos add column if not exists target_group text;
+
+alter table public.yt_videos drop constraint if exists yt_videos_target_group_check;
+alter table public.yt_videos add constraint yt_videos_target_group_check
+  check (target_group is null or target_group in ('A','B','C','D','E'));
+
+-- 기존 즐겨찾기(starred=true)를 ⭐ 후보로 이관
+update public.yt_videos
+   set pick_level = 1
+ where starred = true and coalesce(pick_level, 0) = 0;
+
+-- 후보함 정렬(❤️ 먼저, 그다음 담은 날짜 역순)과 목록에서 담긴 것 제외용
+create index if not exists yt_videos_pick_idx
+  on public.yt_videos (pick_level, starred_at desc);
+```
+
+### 실행하면 이렇게 동작합니다
+
+| 항목 | 동작 |
+|---|---|
+| 발굴·신작에서 ★ | `pick_level = 1` 로 담고 **그 자리에서 목록에서 사라집니다** (낙관적 업데이트) |
+| ⭐ 포함 보기 | 각 탭 상단 토글. 켜면 담아 둔 것도 함께 보입니다 (기본 off) |
+| 후보함 | `pick_level >= 1` 전부. ❤️ 확정이 먼저, 그다음 담은 날짜 역순 |
+| ⭐ / ❤️ | ❤️ 를 다시 누르면 ⭐ 로 내려가고, ⭐ 를 다시 누르면 후보에서 빠집니다 |
+| 용도 태그 | 행마다 A~E 칩. 켜진 것을 다시 누르면 미지정 |
+| 용도 자동 추정 | 처음 담을 때 출처 채널의 그룹 이름으로 채웁니다 — `시사/뉴스`→**A**, `쉬는시간/잡학`→**B**, `지식에세이/에세이`→**D**, 그 외 null |
+| `[아이디어로]` 복사 | 용도가 있으면 `[D] 제목 \| URL` 형식 |
+
+- 담은 시각은 기존 `starred_at` 을 그대로 씁니다(컬럼을 늘리지 않으려고). `starred` 도
+  `pick_level >= 1` 과 항상 같이 갱신되므로, 이관 후에도 옛 화면이 깨지지 않습니다.
+- `upsert_videos` 는 갱신할 컬럼을 명시하는 함수라 **수집이 돌아도 두 컬럼은 보존**됩니다.
+
+### 되돌리려면
+
+```sql
+alter table public.yt_videos drop column if exists pick_level;
+alter table public.yt_videos drop column if exists target_group;
+```
+
+---
+
 ## 0. ⚠️ 에버그린·포화도 함수 — **미실행 확인됨**
 
 서버를 띄워 확인한 결과, 아래 두 함수가 **DB 에 없습니다.** 실제 로그:
