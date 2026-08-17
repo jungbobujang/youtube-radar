@@ -102,6 +102,9 @@
     background: #faeeda; color: #633806; border-radius: var(--radius);
     padding: 10px 12px; font-size: 12.5px; margin-bottom: 14px;
   }
+  /* 눌러서 다른 탭으로 넘어가는 알림 */
+  .notice-go { cursor: pointer; }
+  .notice-go:hover { background: #f6e3c6; }
   .form { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 16px; }
   .form input, .form select {
     border: 1px solid var(--line); border-radius: var(--radius);
@@ -643,6 +646,15 @@ function bumpCount(panel, delta) {
   el.textContent = `${next}건`
 }
 
+// 예심 대기 건수는 표시 문구가 달라 따로 센다 (승격·제외 때 즉시 줄어들게)
+function bumpPending(panel, delta) {
+  const el = panel.querySelector('[data-pending]')
+  if (!el) return
+  const next = Math.max(0, Number(el.dataset.pending) + delta)
+  el.dataset.pending = next
+  el.textContent = `검토 대기 ${next}건`
+}
+
 // 실패를 조용히 삼키지 않되 alert 로 막지도 않는다
 function toast(panel, message) {
   let box = panel.querySelector('.toast')
@@ -1001,6 +1013,23 @@ function conceptTags(v) {
   </div>`
 }
 
+// 발굴 탭 위의 알림 — 기계가 걸러 둔 것이 밀려 있으면 후보함으로 보낸다.
+// 건수는 상태바가 60초마다 읽어 온 값을 그대로 쓴다 (여기서 또 부르지 않는다).
+function auditionBadge() {
+  const n = lastStatus?.audition_pending ?? 0
+  if (!n) return ''
+  return `<div class="notice notice-go" id="audition-go">
+    🤖 예심 통과 <b>${fmt(n)}건</b>이 검토를 기다리고 있어요 — 후보함에서 보기 →</div>`
+}
+
+// 🤖 예심 통과 행의 버튼 — 승격하면 내 후보로, 제외하면 다시 안 올라온다
+function auditionTools(v) {
+  return `
+    <button class="btn btn-sm" data-promote="${esc(v.video_id)}" title="내 후보로 올리기">⭐ 승격</button>
+    <button class="btn-ghost btn-sm" data-drop="${esc(v.video_id)}"
+      title="예심에서 빼기 (다시 올라오지 않습니다)">✕ 제외</button>`
+}
+
 // ⭐ 후보 / ❤️ 확정. ❤️ 를 다시 누르면 ⭐ 로 내린다.
 function pickTools(v) {
   const lv = Number(v.pick_level ?? 1)
@@ -1161,6 +1190,31 @@ function wireRows(panel) {
     b.onclick = () => toggleRelated(panel, b.dataset.rel)
   })
 
+  // 🤖 예심 통과 — 승격/제외. 둘 다 그 자리에서 행이 사라진다.
+  panel.querySelectorAll('[data-promote]').forEach((b) => {
+    b.onclick = async () => {
+      const hidden = dropRow(b)
+      try {
+        await api('/api/pick', {
+          method: 'POST', body: JSON.stringify({ video_id: b.dataset.promote, level: 1 })
+        })
+        bumpPending(panel, -1)
+        render()
+      } catch (e) { undropRow(hidden); toast(panel, e.message) }
+    }
+  })
+  panel.querySelectorAll('[data-drop]').forEach((b) => {
+    b.onclick = async () => {
+      const hidden = dropRow(b)
+      try {
+        await api('/api/pick', {
+          method: 'POST', body: JSON.stringify({ video_id: b.dataset.drop, excluded: true })
+        })
+        bumpPending(panel, -1)
+      } catch (e) { undropRow(hidden); toast(panel, e.message) }
+    }
+  })
+
   panel.querySelectorAll('[data-cmt]').forEach((b) => {
     b.onclick = () => toggleComments(panel, b.dataset.cmt, b.dataset.title)
   })
@@ -1234,6 +1288,7 @@ async function render() {
     if (tab === 'dig') {
       const rows = await api(`/api/dig?period=${digPeriod}&sort=${digSort}&${filterQuery()}`)
       panel.innerHTML = `
+        ${auditionBadge()}
         <div class="filters">
           ${filterBar(`
             <select id="f-sort">
@@ -1258,13 +1313,15 @@ async function render() {
       wireRows(panel)
       wireReset(panel)
       wirePickedToggle()
+      const go = $('#audition-go')
+      if (go) go.onclick = () => { tab = 'picks'; renderTabs(); render() }
       // 화면에 그려진 그대로(=현재 필터·정렬 결과) 내보낸다
       $('#csv').onclick = () => downloadCsv(`youtube-radar-dig-${todayStamp()}.csv`, toCsv(rows))
       return
     }
 
     if (tab === 'picks') {
-      const { rows, summary, ready, concept_ready: conceptReady } =
+      const { rows, auto = [], summary, ready, concept_ready: conceptReady } =
         await api(`/api/picks?level=${pickLevel}&target=${pickTarget}`)
       const chip = (val, label, n) => `<button class="btn-ghost btn-sm ${pickTarget === val ? 'fmt-on' : ''}"
         data-ptarget="${val}">${label}${n == null ? '' : ` ${n}`}</button>`
@@ -1272,6 +1329,18 @@ async function render() {
       panel.innerHTML = `
         ${ready ? '' : `<div class="notice">후보함 컬럼이 아직 없어 옛 즐겨찾기를 그대로 보여주는 중입니다.
           <b>TODO-SQL.md</b> 의 SQL 을 실행하면 ⭐/❤️ 와 용도 태그가 켜집니다.</div>`}
+
+        <h3 class="sec">🤖 예심 통과 <span class="muted">(검토 대기)</span>
+          <span class="muted" data-pending="${auto.length}">검토 대기 ${auto.length}건</span></h3>
+        ${auto.length
+          ? auto.map((v) => videoRow(
+              v,
+              metricBadges(v) + ideaButton(v),
+              { tools: auditionTools(v) }
+            )).join('')
+          : '<p class="muted" style="margin:0 0 10px">대기 중인 예심 통과분이 없어요. 수집이 끝날 때마다 자동으로 채워집니다.</p>'}
+
+        <h3 class="sec">⭐ 내 후보</h3>
         <div class="filters">
           <div class="fstrip">
             ${[['all', '전체'], ['1', '⭐ 후보'], ['2', '❤️ 확정']].map(([v, t]) =>
@@ -1655,6 +1724,8 @@ async function render() {
 // 마지막 수집 시각 · 총 영상 수 · 오늘 쓴 할당량. 수집이 도는 동안엔 5초,
 // 평소엔 60초마다 갱신한다.
 let statusTimer = null
+// 마지막으로 읽은 상태. 발굴 탭의 예심 배지처럼 다른 화면에서도 쓴다.
+let lastStatus = null
 
 const UNIT_SOURCE_LABEL = {
   collect: '수집', channels: '채널 갱신', comments: '댓글 수집',
@@ -1691,6 +1762,7 @@ async function refreshStatus() {
   if (!el) return
   try {
     const s = await api('/api/status')
+    lastStatus = s
     const pct = Math.min(100, Math.round((s.units_today / s.quota_limit) * 100))
     const level = pct >= 90 ? 'danger' : pct >= 70 ? 'warn' : ''
     const at = s.last_run

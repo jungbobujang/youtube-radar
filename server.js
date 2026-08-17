@@ -1338,6 +1338,13 @@ async function collect(opts = {}) {
   addUnitsToday(report.units, 'collect')
   invalidateTrends() // 새 영상이 들어왔으니 다음 조회 때 활력을 다시 계산한다
 
+  // 수집이 끝났으니 0차 선별을 돌린다 (DB 만 본다 — 할당량 0)
+  try {
+    report.audition = await runAudition()
+  } catch (err) {
+    console.warn(`[예심] 실행 실패: ${err.message}`)
+  }
+
   lastRun = {
     at: new Date().toISOString(),
     ms: Date.now() - started,
@@ -1548,6 +1555,138 @@ async function relatedFromDb(keyword, excludeId) {
   return rescoreByTier(rows)
     .sort((a, b) => b.dig_score - a.dig_score)
     .slice(0, 10)
+}
+
+// ---------------------------------------------------------------- 자동 예심 (0차 선별)
+//
+// 사람이 발굴 목록을 훑으며 하던 1차 스캔을 기계가 먼저 한다.
+// 통과분은 후보함의 '검토 대기' 칸에 쌓이고, 사람은 승격/제외만 누르면 된다.
+// 기준은 전부 여기서 조절한다.
+const AUDITION = {
+  MIN_MULTIPLE: 5,        // 배율 하한
+  REACH_GRADE: 'great',   // 침투력 등급 (같은 체급 안에서의 상대평가)
+  ENGAGE_TOP_PCT: 0.5,    // 참여율이 자기 체급에서 상위 이만큼 안에 들 것
+  MAX_SATURATION: 2,      // 다른 채널이 이보다 많이 다뤘으면 탈락
+  MIN_DAYS: 182,          // 발굴 범위 시작 (6개월)
+  MAX_DAYS: 1095,         // 발굴 범위 끝 (3년)
+  FORMAT: 'long',         // 롱폼만
+  PER_CHANNEL: 3,         // 한 채널이 검토 대기 칸을 독점하지 않게 (0 이면 제한 없음)
+  CANDIDATES: 600,        // 한 번에 살펴볼 후보 수
+  SATURATION_MAX: 120     // 포화도를 실제로 재 볼 최대 건수 (제목 ilike 라 비싸다)
+}
+
+let auditionReady = null
+
+async function auditionColumnsReady() {
+  if (auditionReady !== null) return auditionReady
+  const { error } = await supabase
+    .from('yt_videos').select('auto_picked, auto_picked_at, excluded').limit(1)
+  auditionReady = !error
+  if (!auditionReady) {
+    console.warn(`[예심] 컬럼이 아직 없습니다 (TODO-SQL.md 0-F 참고): ${error.message}`)
+  }
+  return auditionReady
+}
+
+// 체급별 참여율 상위 ENGAGE_TOP_PCT 경계값
+function engageCutByTier(rows) {
+  const byTier = new Map()
+  for (const v of rows) {
+    const key = v.tier ?? 'unknown'
+    if (!byTier.has(key)) byTier.set(key, [])
+    byTier.get(key).push(Number(v.engage ?? 0))
+  }
+  const cuts = new Map()
+  for (const [key, list] of byTier) {
+    list.sort((a, b) => a - b)
+    const idx = Math.floor((list.length - 1) * (1 - AUDITION.ENGAGE_TOP_PCT))
+    cuts.set(key, list[idx] ?? 0)
+  }
+  return cuts
+}
+
+// dryRun 이면 DB 를 건드리지 않고 몇 건이 통과하는지만 센다 (소급 적용 미리보기).
+async function runAudition({ dryRun = false } = {}) {
+  const ready = await auditionColumnsReady()
+  if (!ready && !dryRun) return { skipped: 'no-columns', passed: 0 }
+
+  const now = Date.now()
+  const newest = new Date(now - AUDITION.MIN_DAYS * DAY).toISOString()
+  const oldest = new Date(now - AUDITION.MAX_DAYS * DAY).toISOString()
+
+  let q = supabase
+    .from('yt_videos').select('*')
+    .gte('multiple', AUDITION.MIN_MULTIPLE)
+    .gte('published_at', oldest)
+    .lte('published_at', newest)
+    .gte('score', 0)
+    .order('multiple', { ascending: false })
+    .limit(AUDITION.CANDIDATES)
+
+  // 이미 내가 담았거나 제외한 것은 다시 올리지 않는다
+  if (await pickColumnsReady()) q = q.or('pick_level.is.null,pick_level.eq.0')
+  if (ready) q = q.eq('excluded', false)
+
+  const { data, error } = await q
+  if (error) throw error
+
+  const { chans, trends } = await channelContext()
+  const overrides = await formatOverrides()
+  const rows = (data ?? [])
+    .map((v) => ({ ...v, format: effectiveFormat(v, overrides) }))
+    .filter((v) => v.format === AUDITION.FORMAT)
+    .map((v) => ({ ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id)) }))
+
+  // 등급·백분위는 발굴 탭과 같은 방식으로 후보 전체 분포에서 매긴다
+  rescoreByTier(rows)
+  attachGrades(rows)
+  const cuts = engageCutByTier(rows)
+
+  let shortlist = rows.filter((v) =>
+    Number(v.multiple ?? 0) >= AUDITION.MIN_MULTIPLE &&
+    v.grade?.reach === AUDITION.REACH_GRADE &&
+    Number(v.engage ?? 0) >= (cuts.get(v.tier ?? 'unknown') ?? 0))
+
+  // 발굴 탭과 같은 이유로 채널당 상한을 둔다. 한 채널이 잘 나가는 시기에는
+  // 그 채널 영상만 조건을 통과해 검토 대기 칸이 통째로 한 채널로 찬다.
+  if (AUDITION.PER_CHANNEL > 0) {
+    const seen = {}
+    shortlist = shortlist
+      .sort((a, b) => b.dig_score - a.dig_score)
+      .filter((v) => (seen[v.channel_id] = (seen[v.channel_id] ?? 0) + 1) <= AUDITION.PER_CHANNEL)
+  }
+
+  // 포화도는 제목 ilike 라 비싸다. 앞 세 조건을 통과한 것만, 그것도 상한을 두고 잰다.
+  const measured = shortlist.slice(0, AUDITION.SATURATION_MAX)
+  await attachSaturation(measured)
+  const passed = measured.filter((v) =>
+    v.saturation == null || Number(v.saturation) <= AUDITION.MAX_SATURATION)
+
+  const report = {
+    candidates: rows.length,
+    shortlist: shortlist.length,
+    measured: measured.length,
+    passed: passed.length,
+    marked: 0,
+    dry_run: dryRun,
+    sample: passed.slice(0, 10).map((v) => ({
+      title: String(v.title).slice(0, 40), channel: v.channel_title,
+      multiple: v.multiple, reach: v.reach, engage: v.engage, saturation: v.saturation
+    }))
+  }
+  if (dryRun || !ready) return report
+
+  // 이미 통과 표시된 것은 건드리지 않는다 (검토 대기 순서가 흔들리지 않게)
+  const fresh = passed.filter((v) => !v.auto_picked).map((v) => v.video_id)
+  if (fresh.length > 0) {
+    const { error: uErr } = await supabase
+      .from('yt_videos')
+      .update({ auto_picked: true, auto_picked_at: new Date().toISOString() })
+      .in('video_id', fresh)
+    if (uErr) throw uErr
+    report.marked = fresh.length
+  }
+  return report
 }
 
 // ---------------------------------------------------------------- 그룹
@@ -2176,10 +2315,20 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       })
     }
 
-    const { video_id, level, target_group, concept_tags } = req.body ?? {}
+    const { video_id, level, target_group, concept_tags, excluded } = req.body ?? {}
     if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
 
     const patch = {}
+    // 예심 통과분 제외 — 다시 올라오지 않게 표시하고 대기 칸에서 뺀다
+    if (excluded !== undefined) {
+      if (!(await auditionColumnsReady())) {
+        return res.status(503).json({
+          error: '예심 컬럼이 아직 없어요. TODO-SQL.md 0-F 의 SQL 을 먼저 실행해 주세요'
+        })
+      }
+      patch.excluded = !!excluded
+      patch.auto_picked = false
+    }
     if (concept_tags !== undefined) {
       if (!(await conceptColumnReady())) {
         return res.status(503).json({
@@ -2216,9 +2365,10 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       }
     }
 
-    // 컬럼이 없는 상태에서 concept_tags 를 select 하면 통째로 에러가 난다
+    // 컬럼이 없는 상태에서 select 에 넣으면 통째로 에러가 난다
     const cols = 'video_id, pick_level, target_group, starred_at' +
-      ((await conceptColumnReady()) ? ', concept_tags' : '')
+      ((await conceptColumnReady()) ? ', concept_tags' : '') +
+      ((await auditionColumnsReady()) ? ', auto_picked, excluded' : '')
 
     const { data, error } = await supabase
       .from('yt_videos').update(patch).eq('video_id', video_id)
@@ -2314,8 +2464,42 @@ app.get('/api/picks', requireAuth, async (req, res) => {
       summary.by_target.none = rows.length
     }
 
+    // 🤖 예심 통과 — 기계가 걸러 놓고 사람 검토를 기다리는 것 (auto_picked & 아직 안 담김)
+    let auto = []
+    const auditionOn = await auditionColumnsReady()
+    if (auditionOn) {
+      const { data: pending } = await supabase
+        .from('yt_videos').select('*')
+        .eq('auto_picked', true)
+        .eq('excluded', false) // not null default false 라 이 비교로 충분하다
+        .or('pick_level.is.null,pick_level.eq.0')
+        .order('auto_picked_at', { ascending: false })
+        .limit(100)
+
+      auto = rescoreByTier((pending ?? []).map((v) => ({
+        ...v, ...deriveMetrics(v, chans.get(v.channel_id), trends.get(v.channel_id))
+      })))
+      attachGrades(auto)
+      attachEvergreen(auto, await velocityMap(auto.map((v) => v.video_id)))
+      await attachSaturation(auto)
+      auto.sort((a, b) => b.dig_score - a.dig_score)
+    }
+
     // 개념 태그 컬럼이 없으면 화면에서 입력칸 자체를 감춘다 (저장할 때 503 을 보느니)
-    res.json({ rows, summary, ready, concept_ready: await conceptColumnReady() })
+    res.json({
+      rows, auto, summary, ready,
+      concept_ready: await conceptColumnReady(),
+      audition_ready: auditionOn
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 🤖 예심 — 지금 기준으로 다시 돌린다. ?dry=1 이면 세어만 보고 DB 는 안 건드린다.
+app.post('/api/audition', requireAuth, async (req, res) => {
+  try {
+    res.json(await runAudition({ dryRun: req.query.dry === '1' }))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2720,6 +2904,16 @@ app.get('/api/status', requireAuth, async (req, res) => {
     const { count } = await supabase
       .from('yt_videos').select('video_id', { count: 'exact', head: true })
 
+    // 🤖 예심 통과 후 검토를 기다리는 건수 (발굴 탭 배지에 쓴다)
+    let auditionPending = 0
+    if (await auditionColumnsReady()) {
+      const { count: n } = await supabase
+        .from('yt_videos').select('video_id', { count: 'exact', head: true })
+        .eq('auto_picked', true).eq('excluded', false)
+        .or('pick_level.is.null,pick_level.eq.0')
+      auditionPending = n ?? 0
+    }
+
     // DB 장부가 있으면 인스턴스 전부를 합산한 값, 없으면 이 인스턴스의 파일값
     const local = readUnitsFile()
     const shared = await unitsTodayFromDb()
@@ -2732,6 +2926,7 @@ app.get('/api/status', requireAuth, async (req, res) => {
       // 댓글 수집은 영상 1건당 1유닛이라 얼마나 먹었는지 따로 보인다
       comment_units_today: Number(by?.comments) || 0,
       quota_note: QUOTA_NOTE,
+      audition_pending: auditionPending,
       estimate: await estimateDailyUnits(),
       last_run: lastRun && {
         at: lastRun.at, ms: lastRun.ms, videos: lastRun.videos,

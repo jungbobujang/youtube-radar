@@ -5,8 +5,8 @@
 
 실행 전에도 서버는 죽지 않습니다. 해당 기능만 조용히 비어 있습니다.
 
-**⚠️ 실행 대기 4건** — `0-B. 개념 태그` · `0-C. 댓글 수집` · `0-D. 할당량 합산` ·
-`0-E. 설정 행 허용`. 나머지는 전부 실행 완료됐습니다.
+**⚠️ 실행 대기 5건** — `0-B. 개념 태그` · `0-C. 댓글 수집` · `0-D. 할당량 합산` ·
+`0-E. 설정 행 허용` · `0-F. 자동 예심`. 나머지는 전부 실행 완료됐습니다.
 문서는 무엇을 왜 넣었는지 남겨 두려고 그대로 둡니다.
 
 ---
@@ -225,6 +225,48 @@ alter table public.yt_watches add constraint yt_watches_type_check
 | 🔥 급상승 수집 토글 | 저장 실패 안내(항상 off) | 정상 |
 | ⛏ 새 광맥 자동 탐사 토글 | 저장 실패 안내(항상 off · `🔎 지금 탐사` 버튼은 동작) | 정상 |
 | 백카탈로그 완료 채널 제외 | 표시가 안 남아 다음 회차에 또 훑음 (영상 500개 상한에 걸린 채널은 그대로 제외) | 끝까지 훑은 채널도 순회에서 빠짐 |
+
+---
+
+## 0-F. 🤖 자동 예심 (v1.8) — ⚠️ **실행 대기**
+
+사람이 발굴 목록을 훑으며 하던 1차 스캔을 기계가 먼저 합니다.
+통과분은 후보함의 **🤖 예심 통과(검토 대기)** 칸에 쌓이고, 사람은 승격/제외만 누릅니다.
+
+```sql
+alter table public.yt_videos add column if not exists auto_picked boolean not null default false;
+alter table public.yt_videos add column if not exists auto_picked_at timestamptz;
+-- 제외한 것은 다시 예심에 올라오지 않는다
+alter table public.yt_videos add column if not exists excluded boolean not null default false;
+
+create index if not exists yt_videos_audition_idx
+  on public.yt_videos (auto_picked, excluded, pick_level);
+```
+
+### 예심 기준 (`server.js` 의 `AUDITION`)
+
+| 조건 | 값 |
+|---|---|
+| 대상 | 롱폼 · 게시 6개월~3년 (발굴 탭과 같은 범위) |
+| 배율 | **5배 이상** (`MIN_MULTIPLE`) |
+| 침투력 | 같은 체급 안에서 **Great** (`REACH_GRADE`) |
+| 참여율 | 자기 체급 **상위 50%** (`ENGAGE_TOP_PCT`) |
+| 포화도 | 다른 채널이 다룬 수 **2 이하** (`MAX_SATURATION`) |
+| 채널 상한 | 한 채널 **3건**까지 (`PER_CHANNEL`) — 한 채널이 대기 칸을 독점하지 않게 |
+
+- **매 수집이 끝날 때 자동 실행**됩니다. DB 만 보므로 **할당량 0**입니다.
+- `POST /api/audition` 으로 수동 실행, `?dry=1` 이면 세어만 보고 DB 는 안 건드립니다.
+- 이미 담았거나(`pick_level >= 1`) 제외한 것은 다시 올리지 않습니다.
+- **소급 적용(2026-08-17 실측):** 후보 119건 → 조건 통과 7건 → 포화도까지 통과 **5건**
+  (책과삶 3 · 당신이 몰랐던 이야기 2). 채널 상한이 없으면 7건 전부 책과삶 쏠림이었습니다.
+
+### 되돌리려면
+
+```sql
+alter table public.yt_videos drop column if exists auto_picked;
+alter table public.yt_videos drop column if exists auto_picked_at;
+alter table public.yt_videos drop column if exists excluded;
+```
 
 ---
 
