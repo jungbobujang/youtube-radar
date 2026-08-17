@@ -5,7 +5,8 @@
 
 실행 전에도 서버는 죽지 않습니다. 해당 기능만 조용히 비어 있습니다.
 
-**⚠️ 실행 대기 2건 — `0-B. 개념 태그` · `0-C. 댓글 수집` 입니다.** 나머지는 전부 실행 완료됐습니다.
+**⚠️ 실행 대기 3건 — `0-B. 개념 태그` · `0-C. 댓글 수집` · `0-D. 할당량 합산` 입니다.**
+나머지는 전부 실행 완료됐습니다.
 문서는 무엇을 왜 넣었는지 남겨 두려고 그대로 둡니다.
 
 ---
@@ -156,6 +157,51 @@ alter table public.yt_comments enable row level security;
 
 ```sql
 drop table if exists public.yt_comments;
+```
+
+---
+
+## 0-D. ⚡ 할당량 합산 장부 (v1.6) — ⚠️ **실행 대기**
+
+같은 API 키를 **Railway·집·학교**에서 같이 씁니다. 인스턴스마다 자기 파일
+(`logs/units-*.json`)만 보면 "오늘 얼마 썼나" 가 늘 실제보다 적게 나옵니다.
+쓴 만큼 DB 에 한 줄씩 남기고, 상태바는 **태평양 날짜 기준으로 전부 합산**해 보여 줍니다.
+
+```sql
+create table if not exists public.yt_quota_log (
+  id bigserial primary key,
+  units int not null,
+  source text,
+  used_at timestamptz not null default now()
+);
+
+-- 상태바가 늘 '태평양 오늘' 구간만 훑는다
+create index if not exists yt_quota_log_used_idx
+  on public.yt_quota_log (used_at desc);
+
+-- 서버(서비스 키)만 접근. 정책 없음.
+alter table public.yt_quota_log enable row level security;
+```
+
+### 실행하면 이렇게 동작합니다
+
+| 항목 | 동작 |
+|---|---|
+| 기록 시점 | 유닛을 쓸 때마다 한 줄 (`collect` · `channels` · `comments` · `yt-search` · `channel-search` · `channel-lookup`) |
+| 상태바 | `⚡ 오늘` 이 **모든 인스턴스 합산값**으로 바뀝니다 |
+| 테이블이 없으면 | 지금처럼 이 서버의 파일값만 쓰고, 옆에 `(이 서버만)` 이 붙습니다 |
+| 툴팁 | 어디에 얼마를 썼는지 + 합산 범위 + 리셋 안내 |
+| 할당량 초과(403) | 응답이 **429** 로 바뀌고 문구에 "구글 프로젝트 전체 기준 · 태평양 자정(한국 오후 4~5시경) 리셋" 이 붙습니다 |
+
+- 파일 기록(`logs/units-*.json`)도 그대로 남습니다. DB 가 안 될 때의 참고치입니다.
+- 태평양 하루 경계는 서머타임 전환일까지 정확히 맞춥니다(`pacificDayStart`).
+- 줄이 계속 쌓이므로 가끔 비우려면:
+  `delete from public.yt_quota_log where used_at < now() - interval '90 days';`
+
+### 되돌리려면
+
+```sql
+drop table if exists public.yt_quota_log;
 ```
 
 ---

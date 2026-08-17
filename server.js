@@ -56,8 +56,8 @@ function logFailure(scope, err) {
 // 할당량 리셋은 태평양 자정 기준이라 파일 이름도 그 날짜로 끊는다.
 const QUOTA_LIMIT = 10000
 
-function quotaDate() {
-  return new Date().toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
+function quotaDate(now = new Date()) {
+  return now.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
 }
 
 function unitsFile(date = quotaDate()) {
@@ -78,15 +78,15 @@ function readUnitsToday() {
   return readUnitsFile().units
 }
 
-// kind 를 주면 어디에 썼는지도 따로 센다 (댓글 수집이 얼마나 먹는지 상태바에 보이게)
-function addUnitsToday(n, kind) {
+// source 를 주면 어디에 썼는지도 따로 센다 (댓글 수집이 얼마나 먹는지 상태바에 보이게)
+function addUnitsToday(n, source = 'etc') {
   if (!n) return
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true })
     const date = quotaDate()
     const cur = readUnitsFile()
     const by = { ...cur.by }
-    if (kind) by[kind] = (Number(by[kind]) || 0) + Number(n)
+    by[source] = (Number(by[source]) || 0) + Number(n)
     fs.writeFileSync(
       unitsFile(date),
       JSON.stringify({ date, units: cur.units + Number(n), by })
@@ -94,6 +94,94 @@ function addUnitsToday(n, kind) {
   } catch (e) {
     console.warn(`[quota] 사용량 기록 실패: ${e.message}`)
   }
+  // DB 장부는 따로. 실패해도 수집을 멈추지 않는다.
+  logQuotaUnits(n, source).catch((e) => console.warn(`[quota] DB 기록 실패: ${e.message}`))
+}
+
+// ---------------------------------------------------------------- 할당량 합산 장부
+//
+// 같은 API 키를 Railway·집·학교에서 같이 쓴다. 인스턴스마다 자기 파일만 보면
+// "오늘 얼마 썼나" 가 늘 실제보다 적게 나온다. 쓴 만큼 DB 에 한 줄씩 남기고,
+// 상태바는 태평양 날짜 기준으로 전부 합산해 보여 준다.
+// 파일 기록도 그대로 남긴다 (DB 가 안 될 때 쓰는 로컬 참고치).
+let quotaLogAvailable = null
+
+async function quotaTableReady() {
+  if (quotaLogAvailable !== null) return quotaLogAvailable
+  const { error } = await supabase.from('yt_quota_log').select('id').limit(1)
+  quotaLogAvailable = !error
+  if (!quotaLogAvailable) {
+    console.warn(`[quota] yt_quota_log 테이블이 아직 없습니다 (TODO-SQL.md 0-D 참고): ${error.message}`)
+  }
+  return quotaLogAvailable
+}
+
+// 태평양 '오늘' 이 시작된 순간의 UTC 시각.
+// 태평양은 UTC-7(서머타임) 또는 UTC-8 이라 후보가 둘뿐이다. 그중 태평양으로 읽었을 때
+// 오늘 00시가 되는 쪽을 고른다. (흐른 시간만큼 되감는 방식은 서머타임 전환일에 한 시간 어긋난다.)
+function pacificDayStart(now = new Date()) {
+  const date = quotaDate(now)
+  const readPacific = (d) => {
+    const p = new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Los_Angeles', hour12: false,
+      year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit'
+    }).formatToParts(d)
+    const get = (t) => p.find((x) => x.type === t)?.value ?? ''
+    return { date: `${get('year')}-${get('month')}-${get('day')}`, hour: Number(get('hour')) % 24 }
+  }
+
+  for (const offset of [7, 8]) {
+    const guess = new Date(`${date}T00:00:00.000Z`)
+    guess.setUTCHours(guess.getUTCHours() + offset)
+    const p = readPacific(guess)
+    if (p.date === date && p.hour === 0) return guess
+  }
+  // 여기 올 일은 없지만, 오면 넉넉하게 UTC-8 로 잡는다 (덜 세느니 더 세는 쪽)
+  const fallback = new Date(`${date}T00:00:00.000Z`)
+  fallback.setUTCHours(fallback.getUTCHours() + 7)
+  return fallback
+}
+
+async function logQuotaUnits(units, source) {
+  if (!Number(units)) return
+  if (!(await quotaTableReady())) return
+  const { error } = await supabase
+    .from('yt_quota_log').insert({ units: Number(units), source: String(source ?? 'etc') })
+  if (error) console.warn(`[quota] DB 기록 실패: ${error.message}`)
+}
+
+// 태평양 오늘치 전부를 합산한다. 테이블이 없으면 null 을 돌려주고 파일값으로 넘어간다.
+async function unitsTodayFromDb() {
+  if (!(await quotaTableReady())) return null
+  const { data, error } = await supabase
+    .from('yt_quota_log').select('units, source')
+    .gte('used_at', pacificDayStart().toISOString())
+    .limit(5000)
+  if (error) {
+    console.warn(`[quota] DB 합산 실패: ${error.message}`)
+    return null
+  }
+  const by = {}
+  let units = 0
+  for (const r of data ?? []) {
+    const n = Number(r.units) || 0
+    const key = r.source || 'etc'
+    units += n
+    by[key] = (by[key] || 0) + n
+  }
+  return { units, by, entries: (data ?? []).length }
+}
+
+// 할당량은 앱이 아니라 구글 프로젝트 단위다. 이 문장을 오류마다 같이 내보낸다.
+const QUOTA_NOTE = '할당량은 이 앱이 아니라 같은 API 키를 쓰는 구글 클라우드 프로젝트 전체 기준입니다. ' +
+  '태평양 자정(한국 시간 오후 4~5시경)에 리셋됩니다.'
+
+// 할당량 오류면 429 로, 그 밖은 500 으로. 문구에 리셋 안내를 붙인다.
+function sendYtError(res, err) {
+  if (isQuotaError(err)) {
+    return res.status(429).json({ error: `할당량이 바닥났어요. ${QUOTA_NOTE}`, quota: true })
+  }
+  res.status(500).json({ error: err.message })
 }
 
 // ---------------------------------------------------------------- YouTube API
@@ -1086,7 +1174,7 @@ async function collect() {
     collecting = false
   }
 
-  addUnitsToday(report.units)
+  addUnitsToday(report.units, 'collect')
   invalidateTrends() // 새 영상이 들어왔으니 다음 조회 때 활력을 다시 계산한다
 
   lastRun = {
@@ -1179,7 +1267,7 @@ async function resolveChannelId(input) {
   const handle = raw.match(/@([A-Za-z0-9._-]+)/)
   if (handle) {
     const data = await ytGet('channels', { part: 'id', forHandle: `@${handle[1]}` })
-    addUnitsToday(1)
+    addUnitsToday(1, 'channel-lookup')
     if (data.items?.[0]?.id) return data.items[0].id
   }
 
@@ -1187,7 +1275,7 @@ async function resolveChannelId(input) {
   const name = raw.replace(/^https?:\/\/[^/]+\//, '').replace(/^(c|user)\//, '').split(/[/?]/)[0]
   if (name) {
     const data = await ytGet('search', { part: 'snippet', type: 'channel', q: name, maxResults: 1 })
-    addUnitsToday(100)
+    addUnitsToday(100, 'channel-search')
     if (data.items?.[0]?.id?.channelId) return data.items[0].id.channelId
   }
   return null
@@ -2076,11 +2164,17 @@ app.post('/api/comments/collect', requireAuth, async (req, res) => {
 
     const r = await collectCommentsFor(video_id, { force: true })
     if (r.skipped === 'error') {
-      return res.status(502).json({ error: `댓글을 받지 못했어요 (댓글이 꺼진 영상일 수 있어요): ${r.error}` })
+      const quota = /quota|429/i.test(r.error ?? '')
+      return res.status(quota ? 429 : 502).json({
+        error: quota
+          ? `할당량이 바닥났어요. ${QUOTA_NOTE}`
+          : `댓글을 받지 못했어요 (댓글이 꺼진 영상일 수 있어요): ${r.error}`,
+        quota
+      })
     }
     res.json(r)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    sendYtError(res, err)
   }
 })
 
@@ -2245,10 +2339,10 @@ app.post('/api/related/search', requireAuth, async (req, res) => {
     }
 
     const units = 100 + Math.ceil(ids.length / 50)
-    addUnitsToday(units)
+    addUnitsToday(units, 'yt-search')
     res.json({ keyword: term, saved, units, results: await relatedFromDb(term, video_id) })
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    sendYtError(res, err)
   }
 })
 
@@ -2373,11 +2467,19 @@ app.get('/api/status', requireAuth, async (req, res) => {
   try {
     const { count } = await supabase
       .from('yt_videos').select('video_id', { count: 'exact', head: true })
-    const { units, by } = readUnitsFile()
+
+    // DB 장부가 있으면 인스턴스 전부를 합산한 값, 없으면 이 인스턴스의 파일값
+    const local = readUnitsFile()
+    const shared = await unitsTodayFromDb()
+    const { units, by } = shared ?? local
+
     res.json({
       collecting,
+      units_shared: !!shared, // false 면 이 인스턴스에서 쓴 것만 센 값이다
+      units_by: by ?? {},
       // 댓글 수집은 영상 1건당 1유닛이라 얼마나 먹었는지 따로 보인다
       comment_units_today: Number(by?.comments) || 0,
+      quota_note: QUOTA_NOTE,
       last_run: lastRun && {
         at: lastRun.at, ms: lastRun.ms, videos: lastRun.videos,
         units: lastRun.units, errors: lastRun.errors?.length ?? 0, aborted: lastRun.aborted ?? null
@@ -2395,10 +2497,10 @@ app.get('/api/status', requireAuth, async (req, res) => {
 app.post('/api/channels/refresh', requireAuth, async (req, res) => {
   try {
     const r = await refreshChannels(true)
-    addUnitsToday(r.units)
+    addUnitsToday(r.units, 'channels')
     res.json(r)
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    sendYtError(res, err)
   }
 })
 
@@ -2409,7 +2511,7 @@ app.post('/api/collect', requireAuth, async (req, res) => {
     }
     res.json(await collect())
   } catch (err) {
-    res.status(500).json({ error: err.message })
+    sendYtError(res, err)
   }
 })
 

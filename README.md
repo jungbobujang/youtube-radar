@@ -423,10 +423,29 @@ alter table public.yt_comments enable row level security; -- 정책 없음 = 서
 | 🎞 영상 | `yt_videos` 총 행 수 |
 | ⚡ 오늘 | 오늘 쓴 유닛 / 10,000 + 사용률 막대 (70% 주황, 90% 빨강) |
 
-오늘 쓴 유닛은 **DB 가 아니라 `logs/units-YYYY-MM-DD.json`** 에 적힙니다.
-할당량 리셋이 **태평양 자정** 기준이라 파일도 그 날짜로 끊습니다.
-수집·채널 갱신·`유튜브 전체에서 찾기`·채널 추가(검색 폴백)가 모두 여기에 합산됩니다.
-서버를 재시작해도 남지만, **YouTube 가 세는 값이 아니라 이 앱이 센 값**이므로 참고치입니다.
+오늘 쓴 유닛은 **`yt_quota_log` 테이블에 한 줄씩** 남고, 상태바는 그것을
+**태평양 날짜 기준으로 합산**해 보여 줍니다. 같은 API 키를 Railway·집·학교에서 함께 쓰므로
+어디서 썼든 한 숫자로 모입니다. 테이블이 없으면 예전처럼 이 서버의
+`logs/units-YYYY-MM-DD.json` 만 세고 옆에 `(이 서버만)` 이 붙습니다.
+
+수집·채널 갱신·`유튜브 전체에서 찾기`·채널 추가(검색 폴백)·댓글 수집이 모두 합산되며,
+툴팁에 항목별 내역이 나옵니다. **YouTube 가 세는 값이 아니라 이 앱이 센 값**이므로 참고치입니다.
+
+> **할당량이 바닥나면** — 응답이 429 로 바뀌고 이렇게 안내합니다:
+> *할당량은 이 앱이 아니라 같은 API 키를 쓰는 **구글 클라우드 프로젝트 전체 기준**이며,
+> **태평양 자정(한국 시간 오후 4~5시경)** 에 리셋됩니다.*
+> 수집 중이었다면 그 사이클만 접고 다음 주기에 다시 시도합니다.
+
+```sql
+create table if not exists public.yt_quota_log (
+  id bigserial primary key,
+  units int not null,
+  source text,
+  used_at timestamptz not null default now()
+);
+create index if not exists yt_quota_log_used_idx on public.yt_quota_log (used_at desc);
+alter table public.yt_quota_log enable row level security; -- 정책 없음 = 서버 전용
+```
 
 발굴 탭의 `⬇️ CSV` 는 서버를 다시 부르지 않고 **화면에 그려진 목록 그대로**
 내보냅니다(제목·채널·조회수·배율·침투·참여·게시일·URL). 엑셀 한글 깨짐 방지로

@@ -1622,6 +1622,27 @@ async function render() {
 // 평소엔 60초마다 갱신한다.
 let statusTimer = null
 
+const UNIT_SOURCE_LABEL = {
+  collect: '수집', channels: '채널 갱신', comments: '댓글 수집',
+  'yt-search': '유튜브 검색', 'channel-search': '채널 검색', 'channel-lookup': '채널 조회',
+  etc: '기타'
+}
+
+// 어디에 얼마를 썼는지 + 어느 범위를 센 값인지. 상태바 툴팁으로 붙는다.
+function unitsTip(s) {
+  const by = Object.entries(s.units_by ?? {})
+    .sort((a, b) => b[1] - a[1])
+    .map(([k, v]) => `${UNIT_SOURCE_LABEL[k] ?? k} ${fmt(v)}`)
+    .join(' · ')
+  return [
+    s.units_shared
+      ? '모든 인스턴스(Railway·집·학교) 합산 — yt_quota_log 기준'
+      : '이 서버에서 쓴 것만 (yt_quota_log 미실행 · TODO-SQL.md 0-D)',
+    by || '오늘 쓴 유닛 없음',
+    s.quota_note ?? ''
+  ].filter(Boolean).join('\n')
+}
+
 async function refreshStatus() {
   const el = $('#status')
   if (!el) return
@@ -1639,15 +1660,16 @@ async function refreshStatus() {
         ? '<span class="dot"></span><span class="st-live">수집 중...</span>'
         : `⏱ 마지막 수집 <b>${esc(at)}</b>`}</span>
       <span class="st">🎞 영상 <b>${fmt(s.total_videos)}</b>개</span>
-      <span class="st ${level ? `st-${level}` : ''}"
-            title="수집·채널 갱신·유튜브 검색(100유닛)·댓글 수집(영상당 1유닛) 합계">
+      <span class="st ${level ? `st-${level}` : ''}" title="${esc(unitsTip(s))}">
         ⚡ 오늘 <b>${fmt(s.units_today)}</b> / ${fmt(s.quota_limit)}유닛${
+          s.units_shared ? '' : ' <span class="muted">(이 서버만)</span>'}${
           s.comment_units_today ? ` <span class="muted">(💬 ${fmt(s.comment_units_today)})</span>` : ''}</span>
       <span class="bar ${level ? `bar-${level}` : ''}" title="${pct}% 사용 (${esc(s.quota_date)} 태평양 기준)">
         <span style="width:${pct}%"></span>
       </span>
       ${s.last_run?.aborted === 'quota'
-        ? '<span class="st st-danger"><b>할당량 초과로 중단 · 다음 주기 재시도</b></span>' : ''}
+        ? `<span class="st st-danger" title="${esc(s.quota_note ?? '')}">
+             <b>할당량 초과로 중단</b> · 태평양 자정(한국 오후 4~5시경) 리셋 후 재시도</span>` : ''}
       ${s.last_run?.errors
         ? `<span class="st st-warn"><b>최근 수집 오류 ${s.last_run.errors}건</b></span>` : ''}
     `
