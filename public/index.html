@@ -198,10 +198,24 @@
   .toast { margin: 0 0 8px; }
   .rel { flex: none; white-space: nowrap; }
 
-  .relpanel {
+  .relpanel, .cmtpanel {
     background: var(--surface); border: 1px solid var(--line);
     border-radius: var(--radius); padding: 10px 12px; margin: 0 0 10px;
   }
+
+  /* 댓글 패널 */
+  .cmt { flex: none; white-space: nowrap; }
+  .cmt-head { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; margin-bottom: 8px; }
+  .cmt-acts { margin-left: auto; display: flex; gap: 6px; }
+  .cmt-top {
+    margin: 0 0 10px; padding: 8px 10px; border-radius: var(--radius);
+    background: #f6f4ee; color: var(--ink-soft); font-size: 13px; line-height: 1.6;
+  }
+  /* 길어지면 패널이 화면을 다 먹는다. 안에서 스크롤한다. */
+  .cmt-list { max-height: 420px; overflow-y: auto; }
+  .cmt-row { padding: 8px 0; border-top: 1px solid var(--line); }
+  .cmt-row:first-child { border-top: none; }
+  .cmt-row p { margin: 3px 0 0; font-size: 13px; line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
   .rel-head { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 8px; }
   .rel-kw {
     flex: 1; min-width: 140px; border: 1px solid var(--line);
@@ -689,7 +703,8 @@ function videoRow(v, extra = '', opts = {}) {
     </div>
     <div class="tools">${extra}${tools}</div>
   </div>
-  <div class="relpanel hide" data-panel="${esc(v.video_id)}"></div>`
+  <div class="relpanel hide" data-panel="${esc(v.video_id)}"></div>
+  <div class="cmtpanel hide" data-cpanel="${esc(v.video_id)}"></div>`
 }
 
 // 일평균 조회수 + 최근 N일 증가량. 스냅샷이 2개 미만이면 증가량만 '측정 중'.
@@ -838,6 +853,123 @@ function ideaText(b) {
   return `${target}${b.dataset.title} | https://www.youtube.com/watch?v=${b.dataset.vid}${tail}`
 }
 
+// ---------------------------------------------------------------- 댓글
+
+function commentButton(v) {
+  return `<button class="btn-ghost btn-sm cmt" data-cmt="${esc(v.video_id)}"
+    data-title="${esc(v.title)}" title="수집된 댓글 보기 (수집은 영상당 1유닛)">
+    💬<span class="lbl"> 댓글</span></button>`
+}
+
+// 요청·공감 신호는 서버가 센 값을 그대로 쓴다 (낱말 목록이 서버에 있다)
+function commentHead(data, videoId) {
+  const s = data.stats
+  const top = s?.top
+  return `<div class="cmt-head">
+    <span class="m">💬 총 <b>${fmt(s?.total ?? 0)}</b>개</span>
+    <span class="m" title="'해주세요 · 알려주세요 · 궁금' 이 들어간 댓글">🙋 요청 ${fmt(s?.requests ?? 0)}</span>
+    <span class="m" title="'저도 · 공감 · 내 얘기' 가 들어간 댓글">🤝 공감 ${fmt(s?.empathy ?? 0)}</span>
+    ${s?.collected_at ? `<span class="muted">${day(s.collected_at)} 수집</span>` : ''}
+    <span class="cmt-acts">
+      <button class="btn-ghost btn-sm cmt-copy" data-ccopy="${esc(videoId)}">📋 댓글 복사</button>
+      <button class="btn-ghost btn-sm cmt-refresh" data-crefresh="${esc(videoId)}"
+        title="유튜브에서 다시 받아옵니다">↻ 갱신 (1유닛)</button>
+    </span>
+  </div>
+  ${top ? `<p class="cmt-top">👑 좋아요 1위 · ${fmt(top.like_count)}<br>${esc(top.text.slice(0, 300))}</p>` : ''}`
+}
+
+function commentRow(c) {
+  return `<div class="cmt-row">
+    <div class="sub">
+      <span class="m">👍 ${fmt(c.like_count)}</span>
+      ${c.reply_count ? `<span>답글 ${fmt(c.reply_count)}</span>` : ''}
+      <span>${day(c.published_at)}</span>
+    </div>
+    <p>${esc(c.text)}</p>
+  </div>`
+}
+
+// 복사본은 Claude 에게 통째로 넘겨 분석시키는 용도라, 사람이 읽을 머리말을 붙인다
+const COPY_TOP = 30
+
+function commentCopyText(title, videoId, data) {
+  const s = data.stats ?? {}
+  const lines = [
+    `${title} | https://www.youtube.com/watch?v=${videoId}`,
+    `상위 댓글 ${Math.min(COPY_TOP, data.rows.length)}개 (총 ${s.total ?? 0}개 수집 · 요청 ${s.requests ?? 0} · 공감 ${s.empathy ?? 0})`,
+    ''
+  ]
+  data.rows.slice(0, COPY_TOP).forEach((c, i) => {
+    lines.push(`${i + 1}. (👍 ${c.like_count}${c.reply_count ? ` · 답글 ${c.reply_count}` : ''}) ${c.text.replace(/\s+/g, ' ')}`)
+  })
+  return lines.join('\n')
+}
+
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text) } catch {
+    const ta = document.createElement('textarea')
+    ta.value = text; document.body.appendChild(ta); ta.select()
+    document.execCommand('copy'); ta.remove()
+  }
+}
+
+async function toggleComments(panel, videoId, title) {
+  const box = panel.querySelector(`[data-cpanel="${CSS.escape(videoId)}"]`)
+  if (!box) return
+  if (!box.classList.contains('hide')) {
+    box.classList.add('hide'); box.innerHTML = ''; return
+  }
+  box.classList.remove('hide')
+  box.innerHTML = '<p class="muted">댓글 불러오는 중...</p>'
+
+  let data
+  try {
+    data = await api(`/api/comments?video_id=${encodeURIComponent(videoId)}`)
+  } catch (e) { box.innerHTML = `<p class="err">${esc(e.message)}</p>`; return }
+
+  if (!data.ready) {
+    box.innerHTML = `<div class="notice">댓글 테이블이 아직 없습니다.
+      <b>TODO-SQL.md 0-C</b> 의 SQL 을 실행하면 켜집니다.</div>`
+    return
+  }
+  if (data.rows.length === 0) {
+    box.innerHTML = `<p class="muted">아직 수집된 댓글이 없어요.
+      <button class="btn btn-sm" data-crefresh="${esc(videoId)}">지금 수집 (1유닛)</button></p>`
+  } else {
+    box.innerHTML = commentHead(data, videoId) +
+      `<div class="cmt-list">${data.rows.map(commentRow).join('')}</div>`
+  }
+
+  box.querySelectorAll('[data-ccopy]').forEach((b) => {
+    b.onclick = async () => {
+      await copyText(commentCopyText(title, videoId, data))
+      b.textContent = '✅ 복사됨'
+      setTimeout(() => { b.textContent = '📋 댓글 복사' }, 1400)
+    }
+  })
+  box.querySelectorAll('[data-crefresh]').forEach((b) => {
+    b.onclick = async () => {
+      b.disabled = true
+      const face = b.textContent
+      b.textContent = '수집 중...'
+      try {
+        await api('/api/comments/collect', {
+          method: 'POST', body: JSON.stringify({ video_id: videoId })
+        })
+        box.classList.remove('hide')
+        box.classList.add('hide') // 토글을 닫았다 다시 열어 새로 그린다
+        await toggleComments(panel, videoId, title)
+        refreshStatus()
+      } catch (e) {
+        b.disabled = false
+        b.textContent = face
+        toast(panel, e.message)
+      }
+    }
+  })
+}
+
 // ---------------------------------------------------------------- 후보 관리함
 
 // 용도 칩 A~E. 누르면 지정, 이미 켜진 것을 다시 누르면 미지정으로 돌린다.
@@ -884,17 +1016,22 @@ function pickTools(v) {
 function dropRow(el) {
   const row = el.closest('.row')
   if (!row) return null
-  const panel = row.nextElementSibling?.classList.contains('relpanel') ? row.nextElementSibling : null
-  const restore = { row, panel, display: row.style.display }
+  // 행 뒤에 붙는 패널(관련 주제·댓글)도 같이 접는다
+  const panels = []
+  for (let n = row.nextElementSibling; n; n = n.nextElementSibling) {
+    if (!n.classList.contains('relpanel') && !n.classList.contains('cmtpanel')) break
+    panels.push(n)
+  }
+  const restore = { row, panels, display: row.style.display }
   row.style.display = 'none'
-  if (panel) panel.style.display = 'none'
+  panels.forEach((p) => { p.style.display = 'none' })
   return restore
 }
 
 function undropRow(restore) {
   if (!restore) return
   restore.row.style.display = restore.display
-  if (restore.panel) restore.panel.style.display = ''
+  restore.panels.forEach((p) => { p.style.display = '' })
 }
 
 // 태그 한 줄은 자기 자신만 다시 그린다. 목록 전체를 render() 하면
@@ -1022,6 +1159,10 @@ function wireRows(panel) {
 
   panel.querySelectorAll('[data-rel]').forEach((b) => {
     b.onclick = () => toggleRelated(panel, b.dataset.rel)
+  })
+
+  panel.querySelectorAll('[data-cmt]').forEach((b) => {
+    b.onclick = () => toggleComments(panel, b.dataset.cmt, b.dataset.title)
   })
 }
 
@@ -1151,7 +1292,7 @@ async function render() {
         ${rows.length
           ? rows.map((v) => videoRow(
               v,
-              metricBadges(v, targetChips(v)) + ideaButton(v),
+              metricBadges(v, targetChips(v)) + commentButton(v) + ideaButton(v),
               { tools: pickTools(v), metaExtra: conceptReady ? conceptTags(v) : '' }
             )).join('')
           : stateBox('여기 담긴 영상이 없어요', '발굴·신작 목록에서 ★ 을 누르면 이리로 옵니다.')}
@@ -1498,7 +1639,10 @@ async function refreshStatus() {
         ? '<span class="dot"></span><span class="st-live">수집 중...</span>'
         : `⏱ 마지막 수집 <b>${esc(at)}</b>`}</span>
       <span class="st">🎞 영상 <b>${fmt(s.total_videos)}</b>개</span>
-      <span class="st ${level ? `st-${level}` : ''}">⚡ 오늘 <b>${fmt(s.units_today)}</b> / ${fmt(s.quota_limit)}유닛</span>
+      <span class="st ${level ? `st-${level}` : ''}"
+            title="수집·채널 갱신·유튜브 검색(100유닛)·댓글 수집(영상당 1유닛) 합계">
+        ⚡ 오늘 <b>${fmt(s.units_today)}</b> / ${fmt(s.quota_limit)}유닛${
+          s.comment_units_today ? ` <span class="muted">(💬 ${fmt(s.comment_units_today)})</span>` : ''}</span>
       <span class="bar ${level ? `bar-${level}` : ''}" title="${pct}% 사용 (${esc(s.quota_date)} 태평양 기준)">
         <span style="width:${pct}%"></span>
       </span>

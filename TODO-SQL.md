@@ -5,7 +5,7 @@
 
 실행 전에도 서버는 죽지 않습니다. 해당 기능만 조용히 비어 있습니다.
 
-**⚠️ 실행 대기 1건 — `0-B. 개념 태그` 입니다.** 나머지는 전부 실행 완료됐습니다.
+**⚠️ 실행 대기 2건 — `0-B. 개념 태그` · `0-C. 댓글 수집` 입니다.** 나머지는 전부 실행 완료됐습니다.
 문서는 무엇을 왜 넣었는지 남겨 두려고 그대로 둡니다.
 
 ---
@@ -107,6 +107,55 @@ create index if not exists yt_videos_pick_idx
 ```sql
 alter table public.yt_videos drop column if exists pick_level;
 alter table public.yt_videos drop column if exists target_group;
+```
+
+---
+
+## 0-C. 💬 댓글 수집 (v1.5) — ⚠️ **실행 대기**
+
+후보로 담은 영상(`pick_level >= 1`)의 **상위 댓글만** 모읍니다. 목록 전체의 댓글을 받으면
+할당량이 남아나지 않습니다. `commentThreads.list` 는 호출당 1유닛이라 **영상 1건 = 1유닛**입니다.
+
+```sql
+create table if not exists public.yt_comments (
+  video_id text not null references public.yt_videos(video_id) on delete cascade,
+  comment_id text primary key,
+  text text,
+  like_count int not null default 0,
+  reply_count int not null default 0,
+  published_at timestamptz,
+  collected_at timestamptz not null default now()
+);
+
+-- 패널이 늘 '이 영상의 좋아요순' 으로 읽는다
+create index if not exists yt_comments_video_likes_idx
+  on public.yt_comments (video_id, like_count desc);
+
+-- 서버(서비스 키)만 접근한다. 정책을 만들지 않으므로 anon 키로는 한 줄도 보이지 않는다.
+alter table public.yt_comments enable row level security;
+```
+
+> 다른 표(`yt_videos` 등)는 `disable row level security` 로 두었는데 이 표만 `enable` 입니다.
+> 서비스 키는 RLS 를 우회하므로 서버 동작은 같고, 혹시 anon 키가 새어도 댓글은 안 열립니다.
+
+### 실행하면 이렇게 동작합니다
+
+| 항목 | 동작 |
+|---|---|
+| 수집 대상 | `pick_level >= 1` 인 영상만 |
+| 무엇을 | `commentThreads.list` · `order=relevance` · `maxResults=50` 의 **상위 댓글** (답글은 개수만) |
+| 언제 (자동) | ⭐ 담는 순간 1회 + **주 1회 갱신**(월요일 04:00, 한 번에 최대 100유닛) |
+| 언제 (수동) | 댓글 패널의 `↻ 갱신 (1유닛)` |
+| 다시 받으면 | `comment_id` 충돌 → **좋아요·답글 수와 갱신 시각만** 새로 쓰고, 새 댓글만 줄이 늘어납니다 |
+| 최근 수집분 | 마지막 수집이 7일 이내면 건너뜁니다 (⭐ 를 껐다 켜도 유닛을 또 쓰지 않게) |
+| 댓글이 꺼진 영상 | 403 이 와도 수집 전체를 세우지 않고 `logs/collect-*.log` 에만 남깁니다 |
+
+상수는 `server.js` 의 `COMMENT_MAX`(50) · `COMMENT_REFRESH_D`(7) · `COMMENT_WEEKLY_CAP`(100).
+
+### 되돌리려면
+
+```sql
+drop table if exists public.yt_comments;
 ```
 
 ---

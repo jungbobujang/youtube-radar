@@ -300,6 +300,8 @@ logs/               수집 실패 로그·할당량 장부 (자동 생성 · git
 | `GET  /api/picks` | 🗂 후보함 목록 + 용도별 요약 (`level`, `target` 필터) |
 | `POST /api/pick` | 픽 레벨(0/1/2)·용도 태그·개념 태그 지정 |
 | `GET  /api/starred` · `POST /api/star` | 옛 이름 (픽 레벨로 매핑해 그대로 동작) |
+| `GET  /api/comments` | 💬 담아 둔 영상의 상위 댓글 + 요약 통계 |
+| `POST /api/comments/collect` | 💬 그 영상 댓글 다시 받기 (1유닛 · 후보만) |
 | `GET  /api/related` | 🔎 관련 주제 — DB 안에서만 (할당량 0 · 개념 태그 우선) |
 | `POST /api/related/search` | 🔎 관련 주제 — 유튜브 전체 검색 (100유닛) |
 | `GET  /api/radar` | 30점 이상 영상, 점수순 + 걸린 키워드 |
@@ -375,6 +377,41 @@ create index if not exists yt_videos_concept_tags_gin
 
 > SQL 실행 전에는 입력칸이 아예 보이지 않습니다(`/api/picks` 가 `concept_ready: false`).
 > 전문은 `TODO-SQL.md` **0-B** 에 있습니다.
+
+#### 💬 댓글 수집
+
+후보로 담은 영상만 댓글을 모읍니다. 목록 전체를 받으면 할당량이 남아나지 않습니다.
+`commentThreads.list` 는 **호출당 1유닛**이라 영상 1건 = 1유닛입니다.
+
+| 언제 | 무엇을 |
+|---|---|
+| ⭐ 담는 순간 | 상위 댓글 50개(관련성순) 1회 수집 — 픽 응답을 붙잡지 않고 뒤에서 |
+| 주 1회 (월 04:00) | 담아 둔 영상 중 마지막 수집이 7일 지난 것만, 한 번에 최대 100유닛 |
+| 수동 | 댓글 패널의 `↻ 갱신 (1유닛)` |
+
+다시 받으면 같은 댓글은 **좋아요·답글 수만 갱신**되고 새 댓글만 늘어납니다.
+후보함 행의 `💬 댓글` 을 누르면 패널이 열립니다.
+
+- 상단 요약: **총 수집 수 · 🙋 요청 신호 · 🤝 공감 신호 · 👑 좋아요 1위**
+- 요청 신호 = `해주세요` `알려주세요` `궁금`, 공감 신호 = `저도` `공감` `내 얘기`
+  (낱말은 `server.js` 의 `REQUEST_SIGNALS` · `EMPATHY_SIGNALS` 배열에서 고칩니다)
+- `📋 댓글 복사` 는 **상위 30개**를 제목·URL·요약과 함께 텍스트로 복사합니다 (Claude 에게 넘겨 분석용)
+- 오늘 댓글에 쓴 유닛은 상태바 `⚡ 오늘` 옆에 `(💬 N)` 으로 따로 표시됩니다
+
+```sql
+create table if not exists public.yt_comments (
+  video_id text not null references public.yt_videos(video_id) on delete cascade,
+  comment_id text primary key,
+  text text, like_count int not null default 0, reply_count int not null default 0,
+  published_at timestamptz, collected_at timestamptz not null default now()
+);
+create index if not exists yt_comments_video_likes_idx
+  on public.yt_comments (video_id, like_count desc);
+alter table public.yt_comments enable row level security; -- 정책 없음 = 서버 전용
+```
+
+> 실행 전에는 패널이 안내만 띄우고, 수집 시도는 503 으로 막힙니다.
+> 전문은 `TODO-SQL.md` **0-C** 에 있습니다.
 
 ### 상태바
 

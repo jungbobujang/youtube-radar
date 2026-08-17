@@ -64,22 +64,32 @@ function unitsFile(date = quotaDate()) {
   return path.join(LOG_DIR, `units-${date}.json`)
 }
 
-function readUnitsToday() {
+// 옛 파일에는 by 가 없다. 없으면 빈 칸으로 읽는다.
+function readUnitsFile() {
   try {
-    return Number(JSON.parse(fs.readFileSync(unitsFile(), 'utf8')).units) || 0
+    const j = JSON.parse(fs.readFileSync(unitsFile(), 'utf8'))
+    return { units: Number(j.units) || 0, by: j.by ?? {} }
   } catch {
-    return 0 // 오늘 첫 수집이면 파일이 없다
+    return { units: 0, by: {} } // 오늘 첫 수집이면 파일이 없다
   }
 }
 
-function addUnitsToday(n) {
+function readUnitsToday() {
+  return readUnitsFile().units
+}
+
+// kind 를 주면 어디에 썼는지도 따로 센다 (댓글 수집이 얼마나 먹는지 상태바에 보이게)
+function addUnitsToday(n, kind) {
   if (!n) return
   try {
     fs.mkdirSync(LOG_DIR, { recursive: true })
     const date = quotaDate()
+    const cur = readUnitsFile()
+    const by = { ...cur.by }
+    if (kind) by[kind] = (Number(by[kind]) || 0) + Number(n)
     fs.writeFileSync(
       unitsFile(date),
-      JSON.stringify({ date, units: readUnitsToday() + Number(n) })
+      JSON.stringify({ date, units: cur.units + Number(n), by })
     )
   } catch (e) {
     console.warn(`[quota] 사용량 기록 실패: ${e.message}`)
@@ -1681,6 +1691,130 @@ async function pickColumnsReady() {
   return pickReady
 }
 
+// ---------------------------------------------------------------- 댓글 수집
+//
+// 후보로 담은 영상(pick_level >= 1)만 대상이다. 발굴·신작 목록 전체의 댓글을 받으면
+// 할당량이 남아나지 않는다. commentThreads.list 는 호출당 1유닛이라 영상 1건 = 1유닛이다.
+// 답글은 세기만 하고 본문은 받지 않는다 (상위 댓글만으로 신호는 충분하다).
+const COMMENT_MAX = 50        // 영상당 가져올 상위 댓글 수 (API 상한)
+const COMMENT_REFRESH_D = 7   // 마지막 수집이 이보다 오래된 영상만 다시 받는다
+const COMMENT_WEEKLY_CAP = 100 // 주간 갱신 한 번에 쓸 최대 유닛(= 영상 수)
+
+let commentsReady = null
+
+async function commentsTableReady() {
+  if (commentsReady !== null) return commentsReady
+  const { error } = await supabase.from('yt_comments').select('comment_id').limit(1)
+  commentsReady = !error
+  if (!commentsReady) {
+    console.warn(`[comments] yt_comments 테이블이 아직 없습니다 (TODO-SQL.md 0-C 참고): ${error.message}`)
+  }
+  return commentsReady
+}
+
+async function fetchComments(videoId) {
+  const data = await ytGet('commentThreads', {
+    part: 'snippet',
+    videoId,
+    order: 'relevance',
+    maxResults: COMMENT_MAX,
+    textFormat: 'plainText'
+  })
+  addUnitsToday(1, 'comments')
+
+  const now = new Date().toISOString()
+  return (data.items ?? []).map((it) => {
+    const top = it.snippet?.topLevelComment
+    const s = top?.snippet ?? {}
+    return {
+      video_id: videoId,
+      comment_id: top?.id ?? it.id,
+      text: String(s.textOriginal ?? s.textDisplay ?? '').slice(0, 4000),
+      like_count: Number(s.likeCount ?? 0),
+      reply_count: Number(it.snippet?.totalReplyCount ?? 0),
+      published_at: s.publishedAt ?? null,
+      collected_at: now
+    }
+  }).filter((c) => c.comment_id)
+}
+
+// force 가 아니면 최근에 받아 온 영상은 건너뛴다.
+// ⭐ 를 껐다 켰다 해도 유닛을 다시 쓰지 않게 하는 장치다.
+async function collectCommentsFor(videoId, { force = false } = {}) {
+  if (!(await commentsTableReady())) return { skipped: 'no-table', units: 0 }
+
+  if (!force) {
+    const { data } = await supabase
+      .from('yt_comments').select('collected_at').eq('video_id', videoId)
+      .order('collected_at', { ascending: false }).limit(1)
+    const at = data?.[0]?.collected_at
+    if (at && Date.now() - new Date(at).getTime() < COMMENT_REFRESH_D * DAY) {
+      return { skipped: 'fresh', units: 0, at }
+    }
+  }
+
+  let rows
+  try {
+    rows = await fetchComments(videoId)
+  } catch (err) {
+    // 댓글을 꺼 둔 영상은 흔하다. 수집 전체를 세우지 않고 로그만 남긴다.
+    logFailure(`comments:${videoId}`, err)
+    return { skipped: 'error', error: err.message, units: 1 }
+  }
+  if (rows.length === 0) return { saved: 0, units: 1 }
+
+  // 같은 댓글이 쌓이지 않게 comment_id 로 충돌시킨다.
+  // 충돌하면 좋아요·답글 수와 갱신 시각이 새 값으로 덮이고, 새 댓글만 줄이 늘어난다.
+  const { error } = await supabase.from('yt_comments').upsert(rows, { onConflict: 'comment_id' })
+  if (error) throw error
+  return { saved: rows.length, units: 1 }
+}
+
+// ⭐ 를 누른 직후에 부른다. 픽 자체는 이미 성공했으므로 여기서 실패해도 조용히 넘긴다.
+function queueComments(videoId) {
+  collectCommentsFor(videoId).catch((err) => logFailure(`comments:${videoId}`, err))
+}
+
+// 주간 갱신 — 담아 둔 영상 중 마지막 수집이 오래된 것만. 한 번에 CAP 유닛까지.
+async function refreshPickComments() {
+  const report = { videos: 0, saved: 0, units: 0, fresh: 0, errors: 0, capped: false }
+  if (!(await commentsTableReady()) || !(await pickColumnsReady())) return report
+
+  const { data: picks, error } = await supabase
+    .from('yt_videos').select('video_id').gte('pick_level', 1).limit(500)
+  if (error) throw error
+
+  for (const p of picks ?? []) {
+    if (report.units >= COMMENT_WEEKLY_CAP) { report.capped = true; break }
+    const r = await collectCommentsFor(p.video_id)
+    report.units += r.units ?? 0
+    if (r.skipped === 'fresh') report.fresh++
+    else if (r.skipped === 'error') report.errors++
+    else { report.videos++; report.saved += r.saved ?? 0 }
+  }
+
+  console.log(`[comments] 주간 갱신 — 영상 ${report.videos}건 · 댓글 ${report.saved}개 · ` +
+    `${report.units}유닛 (최근 수집이라 건너뜀 ${report.fresh}건${report.capped ? ' · 상한 도달' : ''})`)
+  return report
+}
+
+// 댓글에서 읽어 낼 신호. 여기 낱말만 고치면 요약 통계가 따라 바뀐다.
+const REQUEST_SIGNALS = ['해주세요', '해 주세요', '알려주세요', '알려 주세요', '궁금']
+const EMPATHY_SIGNALS = ['저도', '공감', '내 얘기', '내얘기']
+
+const hasAny = (text, words) => words.some((w) => text.includes(w))
+
+function commentStats(rows) {
+  const top = rows[0] ?? null
+  return {
+    total: rows.length,
+    requests: rows.filter((c) => hasAny(c.text ?? '', REQUEST_SIGNALS)).length,
+    empathy: rows.filter((c) => hasAny(c.text ?? '', EMPATHY_SIGNALS)).length,
+    top: top && { text: top.text, like_count: top.like_count },
+    collected_at: rows.reduce((max, c) => (c.collected_at > max ? c.collected_at : max), '') || null
+  }
+}
+
 // 개념 태그 컬럼은 따로 본다. 후보함 SQL(0-A)만 돌리고 이건 아직 안 돌렸을 수 있다.
 let conceptReady = null
 
@@ -1800,6 +1934,9 @@ app.post('/api/pick', requireAuth, async (req, res) => {
       .from('yt_videos').update(patch).eq('video_id', video_id)
       .select(cols).single()
     if (error) throw error
+
+    // 담는 순간 댓글을 1회 받아 둔다. 응답을 붙잡지 않고 뒤에서 돈다.
+    if (patch.pick_level >= 1) queueComments(video_id)
     res.json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -1889,6 +2026,59 @@ app.get('/api/picks', requireAuth, async (req, res) => {
 
     // 개념 태그 컬럼이 없으면 화면에서 입력칸 자체를 감춘다 (저장할 때 503 을 보느니)
     res.json({ rows, summary, ready, concept_ready: await conceptColumnReady() })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 💬 댓글 — 담아 둔 영상의 상위 댓글. 좋아요순.
+app.get('/api/comments', requireAuth, async (req, res) => {
+  try {
+    const { video_id } = req.query
+    if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
+
+    if (!(await commentsTableReady())) {
+      return res.json({ ready: false, rows: [], stats: null })
+    }
+
+    const { data, error } = await supabase
+      .from('yt_comments').select('*').eq('video_id', video_id)
+      .order('like_count', { ascending: false }).limit(200)
+    if (error) throw error
+
+    const rows = data ?? []
+    res.json({ ready: true, rows, stats: commentStats(rows) })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 💬 댓글 수동 수집 (1유닛). 담아 둔 영상만 받는다.
+app.post('/api/comments/collect', requireAuth, async (req, res) => {
+  try {
+    const { video_id } = req.body ?? {}
+    if (!video_id) return res.status(400).json({ error: 'video_id 가 필요해요' })
+
+    if (!(await commentsTableReady())) {
+      return res.status(503).json({
+        error: '댓글 테이블이 아직 없어요. TODO-SQL.md 0-C 의 SQL 을 먼저 실행해 주세요'
+      })
+    }
+
+    // 후보함 밖의 영상까지 받아 주면 할당량이 새어 나간다
+    if (await pickColumnsReady()) {
+      const { data: v } = await supabase
+        .from('yt_videos').select('pick_level').eq('video_id', video_id).single()
+      if (Number(v?.pick_level ?? 0) < 1) {
+        return res.status(400).json({ error: '후보로 담은 영상만 댓글을 받아요 (★ 을 먼저 눌러 주세요)' })
+      }
+    }
+
+    const r = await collectCommentsFor(video_id, { force: true })
+    if (r.skipped === 'error') {
+      return res.status(502).json({ error: `댓글을 받지 못했어요 (댓글이 꺼진 영상일 수 있어요): ${r.error}` })
+    }
+    res.json(r)
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2183,9 +2373,11 @@ app.get('/api/status', requireAuth, async (req, res) => {
   try {
     const { count } = await supabase
       .from('yt_videos').select('video_id', { count: 'exact', head: true })
-    const units = readUnitsToday()
+    const { units, by } = readUnitsFile()
     res.json({
       collecting,
+      // 댓글 수집은 영상 1건당 1유닛이라 얼마나 먹었는지 따로 보인다
+      comment_units_today: Number(by?.comments) || 0,
       last_run: lastRun && {
         at: lastRun.at, ms: lastRun.ms, videos: lastRun.videos,
         units: lastRun.units, errors: lastRun.errors?.length ?? 0, aborted: lastRun.aborted ?? null
@@ -2230,5 +2422,10 @@ app.listen(PORT, () => {
   collect().catch((err) => console.error('[collect] 초기 실행 실패:', err.message))
   cron.schedule('0 */3 * * *', () => {
     collect().catch((err) => console.error('[collect] 예약 실행 실패:', err.message))
+  })
+
+  // 담아 둔 영상의 댓글은 주 1회만 갱신한다 (월요일 04:00, 영상 1건당 1유닛)
+  cron.schedule('0 4 * * 1', () => {
+    refreshPickComments().catch((err) => console.error('[comments] 주간 갱신 실패:', err.message))
   })
 })
