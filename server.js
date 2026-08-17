@@ -1778,11 +1778,12 @@ app.get('/api/discover', requireAuth, async (req, res) => {
     const latest = {}
     for (const s of snaps ?? []) if (!(s.video_id in latest)) latest[s.video_id] = s.views
 
-    res.json(
+    res.json(hidePicked(
       videos
         .map((v) => ({ ...v, views: latest[v.video_id] ?? 0 }))
-        .sort((a, b) => b.views - a.views)
-    )
+        .sort((a, b) => b.views - a.views),
+      req
+    ))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -1800,6 +1801,11 @@ function excludePicked(query, req, ready) {
   if (req.query.picked === '1' || !ready) return query
   return query.or('pick_level.is.null,pick_level.eq.0')
 }
+
+// 쿼리에 조건을 걸기 어려운(또는 목록이 짧은) 탭은 받아 온 뒤에 거른다.
+// 후보함이 유일한 별 모음이 되도록 모든 목록에서 담긴 것을 뺀다.
+const hidePicked = (rows, req) =>
+  req.query.picked === '1' ? rows : (rows ?? []).filter((v) => Number(v.pick_level ?? 0) < 1)
 
 // 💎 발굴 — 채널 중앙값 대비 배율이 높은 과거 영상
 app.get('/api/dig', requireAuth, async (req, res) => {
@@ -2656,7 +2662,8 @@ async function weeklyReport() {
 // 📊 주간 — 수동 조회 전용 (cron 미등록)
 app.get('/api/weekly', requireAuth, async (req, res) => {
   try {
-    res.json(await weeklyReport())
+    const w = await weeklyReport()
+    res.json({ ...w, top_fresh: hidePicked(w.top_fresh, req), new_digs: hidePicked(w.new_digs, req) })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2757,11 +2764,11 @@ app.get('/api/radar', requireAuth, async (req, res) => {
     const latest = {}
     for (const s of snaps ?? []) if (!(s.video_id in latest)) latest[s.video_id] = s.views
 
-    res.json(videos.map((v) => ({
+    res.json(hidePicked(videos.map((v) => ({
       ...v,
       views: latest[v.video_id] ?? 0,
       hits: matchedKeywords(v.title, includeKws)
-    })))
+    })), req))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2769,7 +2776,7 @@ app.get('/api/radar', requireAuth, async (req, res) => {
 
 app.get('/api/tracking', requireAuth, async (req, res) => {
   try {
-    res.json(await buildTracking())
+    res.json(hidePicked(await buildTracking(), req))
   } catch (err) {
     res.status(500).json({ error: err.message })
   }

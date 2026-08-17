@@ -554,6 +554,9 @@ function filterQuery() {
 }
 
 // 담아 둔 영상 포함 토글. 기본은 off — 검토한 건 목록에서 빠져야 다음 것에 집중된다.
+// 필터가 없는 탭도 ⭐ 포함 보기는 똑같이 쓴다
+const pq = () => `picked=${showPicked ? 1 : 0}`
+
 function pickedToggle() {
   return `<button class="btn-ghost btn-sm ${showPicked ? 'fmt-on' : ''}" id="show-picked"
     title="담아 둔 영상까지 함께 보기">⭐ 포함 보기</button>`
@@ -1395,11 +1398,12 @@ async function render() {
     }
 
     if (tab === 'weekly') {
-      const w = await api('/api/weekly')
+      const w = await api(`/api/weekly?${pq()}`)
       const list = (rows, empty) => rows.length
         ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
         : `<p class="empty">${empty}</p>`
       panel.innerHTML = `
+        <div class="filters">${pickedToggle()}</div>
         <p class="muted" style="margin-top:0">
           ${day(w.since)} ~ 오늘 (7일) · ⭐ 전체 ${fmt(w.starred.total)}건
           <b>이번 주 +${fmt(w.starred.this_week)}</b>
@@ -1414,38 +1418,62 @@ async function render() {
         </p>
       `
       wireRows(panel)
+      wirePickedToggle()
       return
     }
 
     if (tab === 'radar') {
-      const rows = await api('/api/radar')
-      panel.innerHTML = rows.length
-        ? rows.map((v) => videoRow(v, `
-            ${v.hits?.length ? `<span class="hits">${v.hits.map(esc).join(' · ')}</span>` : ''}
-            <span class="badge b-score">${v.score}점</span>
-          `)).join('')
-        : `<p class="empty">조건에 맞는 영상이 아직 없어요.
-             <b>⚙️ 감시 관리</b>에서 관심 키워드나 채널을 등록해 보세요.</p>`
+      const rows = await api(`/api/radar?${pq()}`)
+      panel.innerHTML = `
+        <div class="filters">
+          <span class="muted" data-count="${rows.length}">${rows.length}건</span>
+          ${pickedToggle()}
+        </div>
+        ${rows.length
+          ? rows.map((v) => videoRow(v, `
+              ${v.hits?.length ? `<span class="hits">${v.hits.map(esc).join(' · ')}</span>` : ''}
+              <span class="badge b-score">${v.score}점</span>
+            `)).join('')
+          : `<p class="empty">조건에 맞는 영상이 아직 없어요.
+               <b>⚙️ 감시 관리</b>에서 관심 키워드나 채널을 등록해 보세요.</p>`}
+      `
+      wireRows(panel)
+      wirePickedToggle()
       return
     }
 
     if (tab === 'discover') {
-      const rows = await api('/api/discover')
-      panel.innerHTML = rows.length
-        ? rows.map((v) => videoRow(v)).join('')
-        : '<p class="empty">아직 수집된 영상이 없어요. [지금 수집]을 눌러 보세요.</p>'
+      const rows = await api(`/api/discover?${pq()}`)
+      panel.innerHTML = `
+        <div class="filters">
+          <span class="muted" data-count="${rows.length}">${rows.length}건</span>
+          ${pickedToggle()}
+        </div>
+        ${rows.length
+          ? rows.map((v) => videoRow(v)).join('')
+          : '<p class="empty">아직 수집된 영상이 없어요. [지금 수집]을 눌러 보세요.</p>'}
+      `
+      wireRows(panel)
+      wirePickedToggle()
       return
     }
 
     if (tab === 'tracking') {
-      const rows = await api('/api/tracking')
-      panel.innerHTML = rows.length
-        ? rows.map((v) => videoRow(v, `
-            ${v.delta != null ? `<span class="delta">+${fmt(v.delta)}</span>` : ''}
-            <span class="badge ${BADGE_CLASS[v.kind]}">${esc(v.badge)}</span>
-          `)).join('')
-        : '<p class="empty">추적 중인 영상이 없어요.</p>'
+      const rows = await api(`/api/tracking?${pq()}`)
+      panel.innerHTML = `
+        <div class="filters">
+          <span class="muted" data-count="${rows.length}">${rows.length}건</span>
+          ${pickedToggle()}
+        </div>
+        ${rows.length
+          ? rows.map((v) => videoRow(v, `
+              ${v.delta != null ? `<span class="delta">+${fmt(v.delta)}</span>` : ''}
+              <span class="badge ${BADGE_CLASS[v.kind]}">${esc(v.badge)}</span>
+            `)).join('')
+          : '<p class="empty">추적 중인 영상이 없어요.</p>'}
+      `
       wireRows(panel)
+      wirePickedToggle()
       return
     }
 
