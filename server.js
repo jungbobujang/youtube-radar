@@ -1475,26 +1475,92 @@ async function buildTracking(limit = 60) {
 
 // ---------------------------------------------------------------- 채널 ID 추출
 
+// 한글 핸들을 주소창에서 복사하면 %EC%8B%9C... 처럼 퍼센트 인코딩된 채로 붙는다.
+// 먼저 풀어 두지 않으면 @핸들 정규식에 아예 걸리지 않아, 엉뚱한 이름으로 검색(100유닛)이
+// 나가고 다른 채널이 등록된다. 이중 인코딩(%25EC...)까지 보고 변화가 멈출 때까지 최대 3번.
+// 깨진 시퀀스(%ZZ, 홑 %)는 decodeURIComponent 가 던지므로 그때는 원문을 그대로 쓴다.
+function decodePercent(s) {
+  let out = String(s ?? '')
+  for (let i = 0; i < 3 && /%[0-9A-Fa-f]{2}/.test(out); i++) {
+    let next
+    try {
+      next = decodeURIComponent(out)
+    } catch {
+      break // 못 풀면 원문 유지
+    }
+    if (next === out) break
+    out = next
+  }
+  return out
+}
+
+// URL 경로 조각. 스킴 없이 'youtube.com/...' 로 붙여넣는 경우가 흔해 그것도 받는다.
+function urlSegments(text) {
+  const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(text) ? text : `https://${text}`
+  try {
+    const u = new URL(withScheme)
+    // 호스트에 점이 있을 때만 URL 로 인정한다. 그냥 '@핸들' 을 넣으면 '@' 앞이 userinfo 로
+    // 먹혀 핸들이 호스트 자리에 오는데, 그건 URL 이 아니라 핸들이다.
+    if (u.hostname.includes('.')) {
+      // pathname 은 한글을 다시 %인코딩해서 돌려준다 → 조각마다 한 번 더 푼다
+      return u.pathname.split('/').filter(Boolean).map(decodePercent)
+    }
+  } catch {
+    // URL 로 안 읽히면 아래 문자열 처리로
+  }
+  return text.split(/[?#]/)[0].split('/').filter(Boolean)
+}
+
+// 입력(URL·@핸들·채널ID·이름) → 무엇으로 조회할지. 네트워크를 타지 않아 그대로 테스트된다.
+//   { kind: 'id',     value: 'UC...' }   요청 0유닛
+//   { kind: 'handle', value: '@침착맨' }  channels?forHandle — 1유닛
+//   { kind: 'search', value: '침착맨' }   search — 100유닛
+//   { kind: 'none' }                     조회할 것이 없음
+function parseChannelInput(input) {
+  const text = decodePercent(String(input ?? '').trim())
+  if (!text) return { kind: 'none' }
+
+  const direct = text.match(/(UC[A-Za-z0-9_-]{22})/)
+  if (direct) return { kind: 'id', value: direct[1] }
+
+  // 핸들에는 한글·일본어도 온다. 유니코드 글자·숫자와 . _ - 만 받는다.
+  // 문자 클래스에 '/' 가 없으니 뒤에 붙는 /videos · /shorts · /featured 는 저절로 잘린다.
+  const handle = text.match(/@([\p{L}\p{N}._-]+)/u)
+  if (handle) return { kind: 'handle', value: `@${handle[1]}` }
+
+  const seg = urlSegments(text)
+  // 옛 형태 /c/이름 · /user/이름 (뒤에 /videos 가 붙어 있어도 이름만 집는다)
+  const i = seg.findIndex((x) => /^(c|user)$/i.test(x))
+  if (i >= 0 && seg[i + 1]) return { kind: 'search', value: seg[i + 1] }
+  // URL 이 아니라 채널 이름을 그대로 적은 경우
+  if (seg.length === 1 && !seg[0].includes('.')) return { kind: 'search', value: seg[0] }
+
+  // 'youtube.com' 처럼 알맹이가 없는 입력. 예전에는 이게 검색어로 나가 100유닛을 태웠다.
+  return { kind: 'none' }
+}
+
+async function searchChannelId(q) {
+  if (!q) return null
+  const data = await ytGet('search', { part: 'snippet', type: 'channel', q, maxResults: 1 })
+  addUnitsToday(100, 'channel-search')
+  return data.items?.[0]?.id?.channelId ?? null
+}
+
 async function resolveChannelId(input) {
-  const raw = input.trim()
+  const parsed = parseChannelInput(input)
 
-  const direct = raw.match(/(UC[A-Za-z0-9_-]{22})/)
-  if (direct) return direct[1]
+  if (parsed.kind === 'id') return parsed.value
 
-  const handle = raw.match(/@([A-Za-z0-9._-]+)/)
-  if (handle) {
-    const data = await ytGet('channels', { part: 'id', forHandle: `@${handle[1]}` })
+  if (parsed.kind === 'handle') {
+    const data = await ytGet('channels', { part: 'id', forHandle: parsed.value })
     addUnitsToday(1, 'channel-lookup')
     if (data.items?.[0]?.id) return data.items[0].id
+    // 핸들로 못 찾으면 @ 를 떼고 이름 검색까지 가 본다 (옛 채널·개명 대응)
+    return await searchChannelId(parsed.value.slice(1))
   }
 
-  // /c/이름, /user/이름 같은 옛 형태는 검색으로 (100 유닛)
-  const name = raw.replace(/^https?:\/\/[^/]+\//, '').replace(/^(c|user)\//, '').split(/[/?]/)[0]
-  if (name) {
-    const data = await ytGet('search', { part: 'snippet', type: 'channel', q: name, maxResults: 1 })
-    addUnitsToday(100, 'channel-search')
-    if (data.items?.[0]?.id?.channelId) return data.items[0].id.channelId
-  }
+  if (parsed.kind === 'search') return await searchChannelId(parsed.value)
+
   return null
 }
 
@@ -3451,6 +3517,11 @@ async function shouldCollectOnBoot() {
   if (error) return true
   return (data ?? []).length === 0
 }
+
+// 테스트에서 require 할 때는 서버를 띄우지 않는다 (포트 점유·크론 등록 없이 순수 함수만 꺼내 쓰려고).
+module.exports = { parseChannelInput, decodePercent }
+
+if (require.main !== module) return
 
 app.listen(PORT, () => {
   console.log(`[server] http://localhost:${PORT}`)
