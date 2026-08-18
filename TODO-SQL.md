@@ -349,6 +349,49 @@ drop index if exists public.yt_channels_last_upload_idx;
 
 ---
 
+## 0-I. 🚫 관심없음 (v2.1) — ⚠️ **실행 대기**
+
+📺 추천 채널·💀 휴면 광산에서 **밀어낸 채널**입니다. 지우는 게 아니라 "언제까지 안 보겠다"
+(`until`)를 적어 두는 쿨다운이라, 기한이 지나면 알아서 다시 올라옵니다.
+
+```sql
+create table if not exists public.yt_channel_dismissals (
+  channel_id   text primary key,
+  dismissed_at timestamptz not null default now(),
+  until        timestamptz not null
+);
+
+create index if not exists yt_channel_dismissals_until_idx
+  on public.yt_channel_dismissals (until);
+
+-- 서비스 키로만 접근한다. 정책을 만들지 않아 anon 키로는 아무것도 못 읽는다.
+alter table public.yt_channel_dismissals enable row level security;
+```
+
+### 실행하면 이렇게 동작합니다
+
+- 추천 채널 카드에 `🚫 관심없음` 이 생깁니다. 누르면 **6개월**(`DISMISS_MONTHS`) 뒤까지
+  추천에서 빠지고, 화면에서는 즉시 사라지며 `되돌리기` 토스트가 3초 뜹니다.
+- 목록을 자르기(`slice`) **전에** 걸러내므로, 빠진 만큼 **차순위가 그대로 올라와**
+  목록 개수가 유지됩니다. 추가 API 호출은 없습니다(이미 받아 둔 탐사 결과 풀에서 채웁니다).
+- 같은 채널을 또 누르면 기간을 다시 6개월로 셉니다(`upsert`).
+- 만료된 행은 **조회에서 그냥 무시**하고, 실제 삭제는 수집 사이클에서 합니다.
+  읽기만 하는 요청이 쓰기를 하지 않게 하려는 것입니다.
+- ⚙️ 감시 관리에 `🚫 관심없음 목록 (N)` 접이식 칸이 생깁니다 — 채널명·해제 예정일·`지금 해제`.
+
+### 실행 안 하면
+
+`🚫 관심없음` 을 누르면 **503 으로 안내**하고 나머지 기능은 그대로 돕니다.
+감시 관리의 관심없음 칸은 아예 나타나지 않습니다.
+
+### 되돌리려면
+
+```sql
+drop table if exists public.yt_channel_dismissals;
+```
+
+---
+
 ## 0. ✅ 에버그린·포화도 함수 — 실행 완료
 
 **상태: ✅ 실행·동작 확인 (2026-08-17).** 서버를 다시 띄워 확인한 결과 `[metric] ... 실패`

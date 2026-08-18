@@ -1356,6 +1356,15 @@ async function runCycle(report, opts = {}) {
     } catch (err) {
       if (noteError(report, '채널 정보', err)) return
     }
+
+    // d-2. 🚫 관심없음 만료분 정리 (할당량 0). 조회 경로에서 지우면 읽기 요청이
+    //      쓰기를 하게 되므로, 청소는 수집 사이클에서만 한다.
+    try {
+      const purged = await purgeExpiredDismissals()
+      if (purged > 0) report.dismissals_purged = purged
+    } catch (err) {
+      console.warn('[dismiss] 만료 정리 실패(무시):', err.message)
+    }
   }
 
   // e. 채널별 중앙값 대비 배율 갱신
@@ -1903,6 +1912,50 @@ const HOT_KEYWORD_PAIRS = [
   ['동기부여', 'motivation'],
   ['미루기', 'procrastination']
 ]
+
+// ---------------------------------------------------------------- 🚫 관심없음
+//
+// 추천에서 밀어낸 채널. 지우는 게 아니라 '언제까지 안 보겠다'(until)를 적어 둔다.
+// 기본 6개월. 만료된 행은 조회에서 그냥 무시하고, 실제 삭제는 주 1회 수집 때 한다
+// (조회 경로에서 지우면 읽기만 하는 요청이 쓰기를 하게 된다).
+const DISMISS_MONTHS = 6
+
+let dismissReady = null
+
+async function dismissTableReady() {
+  if (dismissReady !== null) return dismissReady
+  const { error } = await supabase.from('yt_channel_dismissals').select('channel_id').limit(1)
+  dismissReady = !error
+  if (!dismissReady) {
+    console.warn(`[dismiss] 관심없음 표가 아직 없습니다 (TODO-SQL.md 0-I): ${error.message}`)
+  }
+  return dismissReady
+}
+
+// 지금도 유효한(=until 이 미래인) 관심없음 채널 id 집합
+async function dismissedChannelIds() {
+  if (!(await dismissTableReady())) return new Set()
+  const { data } = await supabase
+    .from('yt_channel_dismissals')
+    .select('channel_id, until')
+    .gt('until', new Date().toISOString())
+  return new Set((data ?? []).map((r) => r.channel_id))
+}
+
+// 만료된 행 정리 — 수집 사이클에서만 부른다 (주 1회 정도면 충분하다)
+async function purgeExpiredDismissals() {
+  if (!(await dismissTableReady())) return 0
+  const { data, error } = await supabase
+    .from('yt_channel_dismissals')
+    .delete()
+    .lte('until', new Date().toISOString())
+    .select('channel_id')
+  if (error) {
+    console.warn(`[dismiss] 만료 정리 실패(무시): ${error.message}`)
+    return 0
+  }
+  return (data ?? []).length
+}
 
 async function watchedChannelIds() {
   const { data } = await supabase.from('yt_watches').select('value').eq('type', 'channel')
@@ -3094,6 +3147,7 @@ app.get('/api/hot', requireAuth, async (req, res) => {
     const { chans, trends } = await channelContext()
     const overrides = await formatOverrides()
     const watched = await watchedChannelIds()
+    const dismissed = await dismissedChannelIds() // 🚫 관심없음 (until 이 미래인 것만)
     const decorate = (v) => ({
       ...v,
       format: effectiveFormat(v, overrides),
@@ -3154,6 +3208,9 @@ app.get('/api/hot', requireAuth, async (req, res) => {
       }
     })
       .filter((c) => (c.global ? c.outliers >= HOT.GLOBAL_PROMOTE : c.outliers >= 1))
+      // 🚫 관심없음은 여기서 뺀다. 자르기(slice) '전' 이라 빠진 만큼 차순위가 그대로
+      // 올라와 목록 길이가 유지된다 — 따로 채워 넣는 코드가 필요 없다(추가 조회도 없다).
+      .filter((c) => !dismissed.has(c.channel_id))
       // 반복 검증된 채널(광맥 수)이 먼저, 같으면 침투력 순
       .sort((a, b) => b.outliers - a.outliers || (b.reach ?? 0) - (a.reach ?? 0))
       .slice(0, HOT.TOP)
@@ -3191,6 +3248,7 @@ app.get('/api/hot', requireAuth, async (req, res) => {
     const dormant = [...dorm.values()]
       .filter((d) => d.level && d.hit)
       .filter((d) => d.verified || watched.has(d.channel_id))
+      .filter((d) => !dismissed.has(d.channel_id)) // 자르기 전에 빼서 차순위가 올라오게
       .map((d) => ({ ...d, watched: watched.has(d.channel_id) }))
       .sort((a, b) => b.best_views - a.best_views)
       .slice(0, DORMANT.TOP)
@@ -3225,6 +3283,71 @@ app.post('/api/hot/prospect', requireAuth, async (req, res) => {
     if (!sentQuotaAbort(res, report)) res.json(report)
   } catch (err) {
     sendYtError(res, err)
+  }
+})
+
+// 🚫 관심없음 — 추천에서 6개월 밀어낸다 (지우는 게 아니라 쿨다운)
+app.post('/api/hot/dismiss', requireAuth, async (req, res) => {
+  try {
+    if (!(await dismissTableReady())) {
+      return res.status(503).json({ error: '관심없음 표가 아직 없어요. TODO-SQL.md 0-I 를 실행해 주세요' })
+    }
+    const { channel_id: channelId, months } = req.body ?? {}
+    if (!channelId) return res.status(400).json({ error: 'channel_id 가 필요해요' })
+
+    const n = Number(months) > 0 ? Number(months) : DISMISS_MONTHS
+    const until = new Date()
+    until.setMonth(until.getMonth() + n)
+
+    // 이미 있으면 기간을 다시 센다 (또 눌렀다는 건 여전히 보기 싫다는 뜻이다)
+    const { error } = await supabase.from('yt_channel_dismissals').upsert(
+      { channel_id: channelId, dismissed_at: new Date().toISOString(), until: until.toISOString() },
+      { onConflict: 'channel_id' }
+    )
+    if (error) throw error
+    res.json({ ok: true, channel_id: channelId, until: until.toISOString(), months: n })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 되돌리기 / 지금 해제 — 같은 일이다 (행을 지우면 다음 조회부터 다시 보인다)
+app.delete('/api/hot/dismiss/:channelId', requireAuth, async (req, res) => {
+  try {
+    if (!(await dismissTableReady())) {
+      return res.status(503).json({ error: '관심없음 표가 아직 없어요' })
+    }
+    const { error } = await supabase
+      .from('yt_channel_dismissals').delete().eq('channel_id', req.params.channelId)
+    if (error) throw error
+    res.json({ ok: true })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
+// 감시 관리의 '관심없음 목록' — 만료된 것은 빼고 해제 예정일이 가까운 순
+app.get('/api/hot/dismissals', requireAuth, async (req, res) => {
+  try {
+    if (!(await dismissTableReady())) return res.json({ ready: false, rows: [] })
+    const { data, error } = await supabase
+      .from('yt_channel_dismissals')
+      .select('*')
+      .gt('until', new Date().toISOString())
+      .order('until', { ascending: true })
+    if (error) throw error
+
+    // 이름은 yt_channels 에서 붙인다 (관심없음 표에는 id 만 둔다)
+    const chans = await channelMap()
+    res.json({
+      ready: true,
+      rows: (data ?? []).map((r) => ({
+        ...r,
+        channel_title: chans.get(r.channel_id)?.title ?? null
+      }))
+    })
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 

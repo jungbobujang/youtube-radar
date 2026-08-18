@@ -224,6 +224,27 @@
   .ctag-in:focus { border-style: solid; border-color: var(--ink-faint); outline: none; }
   .ctag-in::placeholder { color: var(--ink-faint); }
   .toast { margin: 0 0 8px; }
+  /* 되돌릴 수 있는 알림 — 실패가 아니라 '방금 한 일' 이라 경고 톤을 쓰지 않는다 */
+  .toast-undo {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    background: #eef1f6; color: #33415c; border-radius: var(--radius);
+    padding: 8px 12px; font-size: 13px;
+  }
+  .toast-btn {
+    border: 1px solid #c3cbd9; background: #fff; color: #33415c;
+    border-radius: 999px; padding: 3px 12px; font-size: 12.5px; font-weight: 600;
+    white-space: nowrap; flex: none;
+  }
+  .toast-btn:hover { border-color: #8f9cb3; }
+  .toast-btn:disabled { opacity: .6; }
+
+  /* 🚫 관심없음 목록 (감시 관리 안쪽 접이식) */
+  .dis-box {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    padding: 8px 12px; margin: 14px 0 4px; background: var(--surface);
+  }
+  .dis-box > summary { cursor: pointer; font-size: 14px; font-weight: 700; }
+  .dis-row { min-height: 56px; }
   .rel { flex: none; white-space: nowrap; }
 
   .relpanel, .cmtpanel {
@@ -714,6 +735,39 @@ function toast(panel, message) {
   box._t = setTimeout(() => box.remove(), 4000)
 }
 
+// 되돌릴 수 있는 알림. 실패가 아니라 '방금 한 일' 을 알리는 자리라 err 톤을 쓰지 않는다.
+// undo 를 누르면 되돌리고 토스트는 사라진다. ms 안에 안 누르면 그냥 사라진다.
+function undoToast(panel, message, undoLabel, onUndo, ms = 3000) {
+  const old = panel.querySelector('.toast-undo')
+  if (old) { clearTimeout(old._t); old.remove() }
+
+  const box = document.createElement('p')
+  box.className = 'toast toast-undo'
+  box.innerHTML = `<span>${esc(message)}</span>`
+
+  const btn = document.createElement('button')
+  btn.className = 'toast-btn'
+  btn.textContent = undoLabel
+  btn.onclick = async () => {
+    clearTimeout(box._t)
+    btn.disabled = true
+    btn.textContent = '되돌리는 중…'
+    try {
+      await onUndo()
+      box.remove()
+    } catch (e) {
+      box.className = 'toast err'
+      box.textContent = `되돌리지 못했어요 — ${e.message}`
+      box._t = setTimeout(() => box.remove(), 4000)
+    }
+  }
+  box.appendChild(btn)
+
+  panel.prepend(box)
+  box._t = setTimeout(() => box.remove(), ms)
+  return box
+}
+
 // 기본값이 아닌 필터가 하나라도 걸려 있으면 0건일 때 초기화 버튼을 붙인다
 function filtersActive() {
   return digGroup !== 'all' || digChannel !== 'all' || digSubs !== 'all'
@@ -921,6 +975,15 @@ function ideaText(b) {
 // 해외 영상은 제목을 손대지 않는다. 원문 그대로 두고 표시만 구분한다.
 const isGlobal = (v) => String(v.source ?? '').startsWith('hot:global')
 
+// "2027. 2. 18. 해제 (183일 남음)" — 언제 다시 보이는지가 궁금한 값이다
+function untilLabel(iso) {
+  if (!iso) return '기한 없음'
+  const t = new Date(iso).getTime()
+  if (isNaN(t)) return '기한 없음'
+  const days = Math.max(0, Math.ceil((t - Date.now()) / 864e5))
+  return `${new Date(t).toLocaleDateString('ko-KR')} 해제 (${days}일 남음)`
+}
+
 // ---- 💀 휴면 판정 표시
 // 서버(server.js 의 DORMANT)가 판정한 등급만 그린다. 여기서 다시 계산하지 않는다.
 const DORMANT_FACE = { dead: '💀', dormant: '😴' }
@@ -985,6 +1048,9 @@ function hotChannelRow(c) {
       </div>`).join('')}
     </div>
     <div class="tools">
+      <button class="btn-ghost btn-sm" data-dismiss="${esc(c.channel_id)}"
+        data-label="${esc(c.channel_title || c.channel_id)}"
+        title="6개월간 추천에서 빼기">🚫<span class="lbl"> 관심없음</span></button>
       <button class="btn btn-sm" data-watch-add="${esc(c.channel_id)}"
         data-label="${esc(c.channel_title || '')}"
         data-global="${c.global ? '1' : ''}">+ 감시 추가</button>
@@ -1699,6 +1765,38 @@ async function render() {
           }
         }
       })
+      // 🚫 관심없음 — 6개월 쿨다운. 누르는 즉시 목록에서 치우고(낙관적) 되돌릴 틈을 준다.
+      // 서버가 거절하면 지운 행을 도로 붙인다.
+      panel.querySelectorAll('[data-dismiss]').forEach((b) => {
+        b.onclick = async () => {
+          const id = b.dataset.dismiss
+          const row = b.closest('.row')
+          const anchor = row?.nextSibling
+          const parent = row?.parentNode
+          row?.remove() // 낙관적 제거
+
+          const restore = () => {
+            if (!parent) return
+            if (anchor) parent.insertBefore(row, anchor)
+            else parent.appendChild(row)
+          }
+
+          try {
+            await api('/api/hot/dismiss', {
+              method: 'POST',
+              body: JSON.stringify({ channel_id: id })
+            })
+            undoToast(panel, `${b.dataset.label} — 6개월간 추천 안 함`, '되돌리기', async () => {
+              await api(`/api/hot/dismiss/${encodeURIComponent(id)}`, { method: 'DELETE' })
+              restore()
+            })
+          } catch (e) {
+            restore()
+            toast(panel, e.message)
+          }
+        }
+      })
+
       // ⛏ 채굴 — 감시에 넣되 신작은 보지 않는 모드. 과거만 한 번 캐 온다.
       panel.querySelectorAll('[data-mine]').forEach((b) => {
         b.onclick = async () => {
@@ -1796,6 +1894,10 @@ async function render() {
     }
 
     const { watches, lastRun, growth, dormancy } = await api('/api/watches')
+    // 표가 아직 없으면 조용히 빈 목록 (SQL 미실행 상태에서도 화면은 그대로 돈다)
+    const dismissals = await api('/api/hot/dismissals')
+      .then((r) => r.rows ?? [])
+      .catch(() => [])
     const { groups, links } = await api('/api/groups')
     settings.groups = groups
 
@@ -1922,6 +2024,25 @@ async function render() {
             <button class="btn-ghost btn-sm" data-del="${w.id}">삭제</button>
           </div>`).join('') : '<p class="empty">없음</p>'}
       `).join('')}
+
+      ${dismissals.length ? `
+        <details class="dis-box">
+          <summary>🚫 관심없음 목록 <span class="muted">(${dismissals.length})</span></summary>
+          <p class="muted" style="margin:6px 0 8px">
+            추천 채널·휴면 광산에서 빠져 있습니다. 해제 예정일이 지나면 자동으로 다시 올라옵니다.
+          </p>
+          ${dismissals.map((d) => `
+            <div class="row dis-row">
+              <div class="meta">
+                <span class="title">🚫 ${esc(d.channel_title || d.channel_id)}</span>
+                <div class="sub">
+                  <span>${untilLabel(d.until)}</span>
+                  <span class="muted">${d.channel_title ? esc(d.channel_id) : ''}</span>
+                </div>
+              </div>
+              <button class="btn-ghost btn-sm" data-undismiss="${esc(d.channel_id)}">지금 해제</button>
+            </div>`).join('')}
+        </details>` : ''}
 
       <h3 class="sec">🎯 관심 키워드 <span class="muted">(제목에 걸리면 +30점)</span></h3>
       <div class="form">
@@ -2068,6 +2189,19 @@ async function render() {
       b.onclick = async () => {
         if (!confirm('삭제할까요?')) return
         await api(`/api/watches/${b.dataset.del}`, { method: 'DELETE' }); render()
+      }
+    })
+    // 🚫 관심없음 지금 해제 — 행을 지우면 다음 조회부터 추천에 다시 나온다
+    panel.querySelectorAll('[data-undismiss]').forEach((b) => {
+      b.onclick = async () => {
+        b.disabled = true
+        try {
+          await api(`/api/hot/dismiss/${encodeURIComponent(b.dataset.undismiss)}`, { method: 'DELETE' })
+          render()
+        } catch (e) {
+          b.disabled = false
+          toast(panel, e.message)
+        }
       }
     })
   } catch (e) {
