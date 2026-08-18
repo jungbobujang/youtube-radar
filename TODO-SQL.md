@@ -294,6 +294,61 @@ create index if not exists yt_videos_kept_idx
 
 ---
 
+## 0-H. 💀 휴면 광산 (v2.0) — ⚠️ **실행 대기**
+
+**방치된 채널의 검증된 주제를 캐는 기능입니다.** 마지막 업로드가 오래됐는데 히트작이
+있는 채널은, 주제는 통했지만 사람이 떠난 광산입니다. 그 과거 영상을 백카탈로그로 캐 옵니다.
+
+```sql
+-- ① 마지막 업로드 시각 캐시 (판정을 매번 API 로 다시 묻지 않으려고)
+alter table public.yt_channels add column if not exists last_upload_at timestamptz;
+alter table public.yt_channels add column if not exists last_upload_checked_at timestamptz;
+
+-- ② 백카탈로그 전용 감시 — 신작 수집에서 빠지고 과거만 캔다
+alter table public.yt_watches add column if not exists backlog_only boolean not null default false;
+
+create index if not exists yt_channels_last_upload_idx
+  on public.yt_channels (last_upload_at);
+```
+
+### 판정 기준 (`server.js` 의 `DORMANT`)
+
+| 상수 | 기본값 | 뜻 |
+|---|---|---|
+| `MIN_DAYS` | 90 | 마지막 업로드가 이만큼 지나면 휴면 후보 |
+| `DEAD_DAYS` | 365 | 1년을 넘기면 💀 완전 휴면, 그 사이는 😴 휴면 |
+| `HIT_REACH` | 3 | 히트작 기준 — 최고 조회수가 구독자의 3배 이상 |
+| `HIT_VIEWS` | 500,000 | 구독자를 모를 때 대신 보는 최고 조회수 |
+| `CHECK_BUDGET` | 20 | 1회 탐사에서 최신 업로드를 확인할 채널 수 (채널당 약 1유닛) |
+| `RECHECK_H` | 168 | 한 번 확인한 채널은 이 시간(주 1회) 동안 다시 묻지 않는다 |
+
+### 실행하면 이렇게 동작합니다
+
+- 🔥 HOT 탭에 **💀 휴면 광산** 칸이 생깁니다. `⛏ 백카탈로그 채굴` 버튼으로 감시에 넣되
+  `backlog_only = true` 라 **신작 수집에서는 빠집니다**(어차피 신작이 없습니다).
+- `🔥 지금 탐사` 가 끝날 때 휴면 판정을 함께 갱신합니다(`CHECK_BUDGET` 만큼).
+- 채굴한 채널의 과거 영상은 **💎 발굴 탭에 그대로 합류**합니다(배율·지표 계산 동일).
+- 감시 관리·발굴 채널 필터의 휴면 채널에 💀/😴 가 붙습니다.
+
+### 실행 안 하면
+
+- `backlog_only` 가 없으면 채굴 버튼이 **일반 감시 추가로 넘어갑니다**(신작도 같이 봅니다).
+  기능은 돌지만 신작 수집 유닛이 채널당 2유닛씩 헛돕니다.
+- `last_upload_at` 이 없으면 판정을 **DB 에 쌓인 영상의 최신 게시일로만** 합니다.
+  감시 중인 채널은 그 값이 정확하지만, HOT 으로 발견한 채널은 조회수순 검색 결과라
+  실제보다 오래돼 보일 수 있어 **추정** 표시가 붙고 목록에 올리지 않습니다.
+
+### 되돌리려면
+
+```sql
+alter table public.yt_channels drop column if exists last_upload_at;
+alter table public.yt_channels drop column if exists last_upload_checked_at;
+alter table public.yt_watches drop column if exists backlog_only;
+drop index if exists public.yt_channels_last_upload_idx;
+```
+
+---
+
 ## 0. ✅ 에버그린·포화도 함수 — 실행 완료
 
 **상태: ✅ 실행·동작 확인 (2026-08-17).** 서버를 다시 띄워 확인한 결과 `[metric] ... 실패`

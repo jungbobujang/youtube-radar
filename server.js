@@ -1251,6 +1251,12 @@ async function runCycle(report, opts = {}) {
   for (const w of watches) {
     if (w.type !== 'keyword' && w.type !== 'channel') continue // 나머지는 채점용 설정
     if (only === 'prospect' && w.type !== 'keyword') continue
+    // 💀 백카탈로그 전용(휴면 채널)은 신작을 보지 않는다. 어차피 안 올라오는데
+    // 매 수집마다 2유닛씩(playlistItems + videos) 헛돈다.
+    if (w.type === 'channel' && w.backlog_only) {
+      report.backlog_only = (report.backlog_only ?? 0) + 1
+      continue
+    }
     // 한 감시 대상이 실패해도 나머지는 계속한다
     try {
       let ids = []
@@ -1697,6 +1703,196 @@ const HOT = {
   FORMATS: ['long']
 }
 
+// ---------------------------------------------------------------- 💀 휴면 광산
+//
+// 마지막 업로드가 한참 지났는데 히트작이 있는 채널. 주제는 이미 통했는데 사람이 떠난
+// 광산이라, 그 과거 영상이 통째로 검증된 소재다. 신작은 없으니 한 번 캐 오면 끝이다.
+const DORMANT = {
+  MIN_DAYS: 90,        // 마지막 업로드가 이만큼 지나면 휴면 후보 (3개월)
+  DEAD_DAYS: 365,      // 1년을 넘기면 💀 완전 휴면, 그 사이는 😴 휴면
+  HIT_REACH: 3,        // 히트작 — 최고 조회수가 구독자의 3배 이상
+  HIT_VIEWS: 500000,   // 구독자를 모를 때 대신 보는 최고 조회수
+  CHECK_BUDGET: 20,    // 1회 탐사에서 최신 업로드를 확인할 채널 수 (채널당 약 1유닛)
+  RECHECK_H: 168,      // 한 번 확인한 채널은 이 시간(주 1회) 동안 다시 묻지 않는다
+  TOP: 20              // 화면에 올릴 최대 채널 수
+}
+
+// 마지막 업로드 캐시 컬럼(TODO-SQL.md 0-H). 없으면 DB 추정만으로 돈다.
+let dormantReady = null
+
+async function dormantColumnsReady() {
+  if (dormantReady !== null) return dormantReady
+  const { error } = await supabase.from('yt_channels').select('last_upload_at').limit(1)
+  dormantReady = !error
+  if (!dormantReady) {
+    console.warn(`[dormant] 마지막 업로드 컬럼이 아직 없습니다 (TODO-SQL.md 0-H): ${error.message}`)
+  }
+  return dormantReady
+}
+
+// 백카탈로그 전용 플래그. 없으면 일반 감시로 넣는다(신작도 같이 보게 된다).
+let backlogOnlyReady = null
+
+async function backlogOnlyColumnReady() {
+  if (backlogOnlyReady !== null) return backlogOnlyReady
+  const { error } = await supabase.from('yt_watches').select('backlog_only').limit(1)
+  backlogOnlyReady = !error
+  if (!backlogOnlyReady) {
+    console.warn(`[dormant] backlog_only 컬럼이 아직 없습니다 (TODO-SQL.md 0-H): ${error.message}`)
+  }
+  return backlogOnlyReady
+}
+
+const daysSince = (iso) => (iso ? (Date.now() - new Date(iso).getTime()) / 864e5 : null)
+
+// 며칠 쉬었는가 → 등급. 기준 미만이면 null (휴면 아님).
+function dormancyLevel(lastUploadAt) {
+  const d = daysSince(lastUploadAt)
+  if (d == null || d < DORMANT.MIN_DAYS) return null
+  return d >= DORMANT.DEAD_DAYS ? 'dead' : 'dormant'
+}
+
+// 채널별 휴면 판정. 화면 여러 곳(HOT·감시 관리·발굴 필터)이 같은 잣대를 쓰도록 한곳에 둔다.
+//   verified=true  : yt_channels.last_upload_at (API 로 실제 확인한 값)
+//   verified=false : yt_videos 의 최신 게시일로 추정한 값
+//     └ 감시 중인 채널은 업로드 목록을 통째로 훑으므로 추정도 정확하다.
+//       HOT 으로 발견한 채널은 조회수순 검색 결과뿐이라 실제보다 오래돼 보일 수 있다.
+let dormancyCache = { at: 0, map: null }
+const DORMANCY_TTL_MS = 5 * 60e3 // 파생값이라 잠깐 재사용해도 된다 (탐사·채굴 후에는 비운다)
+
+async function dormancyMap() {
+  if (dormancyCache.map && Date.now() - dormancyCache.at < DORMANCY_TTL_MS) {
+    return dormancyCache.map
+  }
+  const chans = await channelMap()
+  const hasCache = await dormantColumnsReady()
+
+  // 채널별 최신 게시일·최고 조회수 (DB 안에서만 — 할당량 0)
+  // 영상 전체를 도는 자리라 채널마다 상위 2건만 들고 간다. 다 모았다가 정렬하면
+  // 영상 수만큼 메모리를 쓰는데, 정작 쓰는 건 대표작 2개뿐이다.
+  const seen = new Map()
+  const PAGE_SIZE = 1000
+  for (let from = 0; ; from += PAGE_SIZE) {
+    const { data, error } = await supabase
+      .from('yt_videos').select('channel_id, published_at, views, title, video_id')
+      .order('published_at', { ascending: false })
+      .range(from, from + PAGE_SIZE - 1)
+    if (error || !data?.length) break
+    for (const v of data) {
+      if (!v.channel_id) continue
+      let cur = seen.get(v.channel_id)
+      if (!cur) seen.set(v.channel_id, (cur = { latest: null, hits: [] }))
+      if (!cur.latest || v.published_at > cur.latest) cur.latest = v.published_at
+      const hit = { video_id: v.video_id, title: v.title, views: Number(v.views ?? 0) }
+      if (cur.hits.length < 2) {
+        cur.hits.push(hit)
+        cur.hits.sort((a, b) => b.views - a.views)
+      } else if (hit.views > cur.hits[1].views) {
+        cur.hits[1] = hit
+        cur.hits.sort((a, b) => b.views - a.views)
+      }
+    }
+    if (data.length < PAGE_SIZE) break
+  }
+
+  const out = new Map()
+  for (const [id, agg] of seen) {
+    const c = chans.get(id)
+    const cached = hasCache ? c?.last_upload_at : null
+    const lastUploadAt = cached || agg.latest
+    const hits = agg.hits
+    const best = hits[0]?.views ?? 0
+    const subs = Number(c?.subscriber_count ?? 0)
+    out.set(id, {
+      channel_id: id,
+      channel_title: c?.title ?? null,
+      subscriber_count: subs,
+      last_upload_at: lastUploadAt,
+      months: lastUploadAt == null ? null : Math.floor(daysSince(lastUploadAt) / 30),
+      level: dormancyLevel(lastUploadAt),
+      verified: !!cached,
+      // 히트작 — 구독자 대비 배수, 구독자를 모르면 절대 조회수로
+      hit: subs > 0 ? best >= subs * DORMANT.HIT_REACH : best >= DORMANT.HIT_VIEWS,
+      best_views: best,
+      hits
+    })
+  }
+  dormancyCache = { at: Date.now(), map: out }
+  return out
+}
+
+// 최신 업로드를 실제로 확인해 캐시에 적는다.
+// 비용: 업로드 재생목록 ID 조회 50채널당 1유닛(channels.list) + 채널당 1유닛(playlistItems).
+async function verifyLastUploads(channelIds) {
+  const ids = [...new Set(channelIds)].slice(0, DORMANT.CHECK_BUDGET)
+  if (ids.length === 0 || !(await dormantColumnsReady())) return { checked: 0, units: 0 }
+
+  // 업로드 재생목록 ID 먼저 (한 번에 50개)
+  const uploads = new Map()
+  let units = 0
+  for (let i = 0; i < ids.length; i += 50) {
+    const data = await ytGet('channels', {
+      part: 'contentDetails', id: ids.slice(i, i + 50).join(',')
+    })
+    units += 1
+    addUnitsToday(1, 'dormant')
+    for (const c of data.items ?? []) {
+      const pl = c.contentDetails?.relatedPlaylists?.uploads
+      if (pl) uploads.set(c.id, pl)
+    }
+  }
+
+  const rows = []
+  const now = new Date().toISOString()
+  for (const id of ids) {
+    const pl = uploads.get(id)
+    if (!pl) continue
+    try {
+      // 최신 1건만 본다. 업로드 목록은 최신순이라 이걸로 마지막 업로드일이 확정된다.
+      const list = await ytGet('playlistItems', {
+        part: 'contentDetails', playlistId: pl, maxResults: 1
+      })
+      units += 1
+      addUnitsToday(1, 'dormant')
+      const at = list.items?.[0]?.contentDetails?.videoPublishedAt ?? null
+      rows.push({ channel_id: id, last_upload_at: at, last_upload_checked_at: now })
+    } catch (err) {
+      console.warn(`[dormant] 최신 업로드 확인 실패 ${id}: ${err.message}`)
+      if (isQuotaError(err)) break
+    }
+  }
+
+  if (rows.length > 0) {
+    // 다른 컬럼(구독자·중앙값)을 지우지 않도록 upsert 대신 행별 update
+    for (const r of rows) {
+      const { error } = await supabase
+        .from('yt_channels')
+        .update({ last_upload_at: r.last_upload_at, last_upload_checked_at: r.last_upload_checked_at })
+        .eq('channel_id', r.channel_id)
+      if (error) console.warn(`[dormant] 캐시 저장 실패 ${r.channel_id}: ${error.message}`)
+    }
+  }
+  return { checked: rows.length, units }
+}
+
+// 확인이 필요한 채널을 고른다 — 아직 안 물어봤거나, 물어본 지 RECHECK_H 가 지난 것.
+// 이미 감시 중인 채널은 신작 수집으로 최신 게시일이 정확하니 굳이 묻지 않는다.
+async function dormantScanTargets(map) {
+  const chans = await channelMap()
+  const watched = await watchedChannelIds()
+  const cutoff = Date.now() - DORMANT.RECHECK_H * 3600e3
+  return [...map.values()]
+    .filter((d) => !watched.has(d.channel_id))
+    .filter((d) => d.hit)                      // 히트작 없는 채널은 캐도 나올 게 없다
+    .filter((d) => d.level)                     // DB 추정으로도 이미 휴면처럼 보이는 것만
+    .filter((d) => {
+      const at = chans.get(d.channel_id)?.last_upload_checked_at
+      return !at || new Date(at).getTime() < cutoff
+    })
+    .sort((a, b) => b.best_views - a.best_views) // 크게 터진 채널부터 확인한다
+    .map((d) => d.channel_id)
+}
+
 // 관심 키워드 ↔ 영어 검색어. 해외 탐사 대상은 여기만 고치면 바뀐다.
 // 왼쪽(국내어)은 '국내에서 이미 다뤄진 정도' 를 셀 때도 쓴다.
 const HOT_KEYWORD_PAIRS = [
@@ -1858,6 +2054,19 @@ async function prospectHot({ kr = true, global = true } = {}) {
     report.channels = c.updated
   } catch (err) {
     report.errors.push(`채널 정보: ${err.message}`)
+  }
+
+  // 💀 휴면 판정 — 방금 발견한 채널까지 포함해 '마지막 업로드'를 실제로 확인한다.
+  // 검색(100유닛)에 견주면 채널당 1유닛은 잔돈이라 탐사 끝에 붙여 둔다.
+  try {
+    dormancyCache = { at: 0, map: null } // 방금 저장한 영상이 판정에 반영되게 비운다
+    const targets = await dormantScanTargets(await dormancyMap())
+    const d = await verifyLastUploads(targets)
+    report.units += d.units
+    report.dormant_checked = d.checked
+    dormancyCache = { at: 0, map: null } // 확인 결과를 다음 조회가 바로 읽도록
+  } catch (err) {
+    report.errors.push(`휴면 판정: ${err.message}`)
   }
 
   console.log(`[hot] 탐사 완료 — 검색 ${report.terms.length}건 · 영상 ${report.saved}건 · ${report.units}유닛`)
@@ -2288,7 +2497,12 @@ app.get('/api/settings', requireAuth, async (req, res) => {
       .from('yt_watches').select('value, label').eq('type', 'channel').order('label')
     const { data: groups } = await supabase
       .from('yt_groups').select('*').order('position', { ascending: true })
-    res.json({ ...s, channels: chans ?? [], groups: groups ?? [] })
+    // 발굴 탭 채널 필터에 💀/😴 를 붙이려고 휴면 등급을 같이 보낸다
+    const dorm = await dormancyMap()
+    const channels = (chans ?? []).map((c) => ({
+      ...c, dormant: dorm.get(c.value)?.level ?? null
+    }))
+    res.json({ ...s, channels, groups: groups ?? [] })
   } catch (err) {
     res.status(500).json({ error: err.message })
   }
@@ -2970,11 +3184,30 @@ app.get('/api/hot', requireAuth, async (req, res) => {
     const lastHotAt = (found ?? []).reduce(
       (max, v) => (v.first_seen_at > max ? v.first_seen_at : max), '')
 
+    // 4) 💀 휴면 광산 — 캐시된 판정만 읽는다 (이 칸도 할당량 0).
+    //    확인이 안 된 채널은 감시 중일 때만 올린다. HOT 으로 발견한 채널의 추정치는
+    //    조회수순 검색 결과라 실제보다 오래돼 보여서, 잘못 캐면 유닛만 버린다.
+    const dorm = await dormancyMap()
+    const dormant = [...dorm.values()]
+      .filter((d) => d.level && d.hit)
+      .filter((d) => d.verified || watched.has(d.channel_id))
+      .map((d) => ({ ...d, watched: watched.has(d.channel_id) }))
+      .sort((a, b) => b.best_views - a.best_views)
+      .slice(0, DORMANT.TOP)
+
     res.json({
       trending: trendingOut,
       channels,
       global: hidePicked(globalRows, req).slice(0, HOT.TOP),
       global_promote: HOT.GLOBAL_PROMOTE,
+      dormant,
+      dormant_rule: {
+        min_days: DORMANT.MIN_DAYS,
+        dead_days: DORMANT.DEAD_DAYS,
+        hit_reach: DORMANT.HIT_REACH,
+        hit_views: DORMANT.HIT_VIEWS,
+        backlog_only_ready: await backlogOnlyColumnReady()
+      },
       last_prospect_at: lastHotAt || null,
       cost: hotCost(),
       pairs: HOT_KEYWORD_PAIRS.slice(0, HOT.EN_TERMS).map(([ko, en]) => ({ ko, en }))
@@ -2992,6 +3225,45 @@ app.post('/api/hot/prospect', requireAuth, async (req, res) => {
     if (!sentQuotaAbort(res, report)) res.json(report)
   } catch (err) {
     sendYtError(res, err)
+  }
+})
+
+// ⛏ 백카탈로그 채굴 — 휴면 채널을 감시에 넣되 신작 수집에서는 뺀다.
+// 신작이 없는 채널이라 한 번 캐 오면 끝이고, 그래서 수집 비용도 1회성이다.
+app.post('/api/hot/mine', requireAuth, async (req, res) => {
+  try {
+    const { channel_id: channelId, label } = req.body ?? {}
+    if (!channelId) return res.status(400).json({ error: 'channel_id 가 필요해요' })
+
+    if (await existingWatch('channel', channelId)) {
+      return res.status(400).json({ error: '이미 감시 중인 채널이에요' })
+    }
+
+    const backlogReady = await backlogOnlyColumnReady()
+    const row = {
+      type: 'channel', value: channelId, label: label?.trim() || channelId, active: true,
+      ...(backlogReady ? { backlog_only: true } : {})
+    }
+    const { data, error } = await supabase.from('yt_watches').insert(row).select().single()
+    if (error) throw error
+
+    // 휴면 채널은 국내·해외를 가리지 않고 한 칸에 모아 둔다 (발굴 필터에서 갈라 보게)
+    try {
+      const groupId = await seedGroup('휴면 광산', '💀')
+      await supabase
+        .from('yt_watch_groups')
+        .upsert({ watch_id: data.id, group_id: groupId }, { onConflict: 'watch_id,group_id' })
+      data.group_name = '휴면 광산'
+    } catch (gerr) {
+      data.group_error = gerr.message
+    }
+
+    dormancyCache = { at: 0, map: null }
+    // 컬럼이 없으면 신작도 같이 보게 된다. 화면이 그 사실을 알 수 있게 알려 준다.
+    data.backlog_only = backlogReady
+    res.json(data)
+  } catch (err) {
+    res.status(500).json({ error: err.message })
   }
 })
 
@@ -3283,8 +3555,24 @@ app.get('/api/watches', requireAuth, async (req, res) => {
   const { data, error } = await supabase
     .from('yt_watches').select('*').order('created_at', { ascending: true })
   if (error) return res.status(500).json({ error: error.message })
-  res.json({ watches: data ?? [], lastRun, growth: await channelGrowth() })
+  // 이미 감시 중인 채널도 휴면일 수 있다 (뇌과학 쓸래요? 처럼). 같은 잣대로 표시한다.
+  const dorm = await dormancyMap()
+  const dormancy = {}
+  for (const w of data ?? []) {
+    if (w.type !== 'channel') continue
+    const d = dorm.get(w.value)
+    if (d?.level) dormancy[w.value] = { level: d.level, months: d.months, verified: d.verified }
+  }
+  res.json({ watches: data ?? [], lastRun, growth: await channelGrowth(), dormancy })
 })
+
+// yt_watches 에는 (type, value) 유니크 제약이 없다. DB 오류에 기대면 같은 채널이
+// 두 번 들어가 수집이 두 배로 돈다 — 넣기 전에 직접 확인한다.
+async function existingWatch(type, value) {
+  const { data } = await supabase
+    .from('yt_watches').select('id, label, active').eq('type', type).eq('value', value).limit(1)
+  return data?.[0] ?? null
+}
 
 // 이름으로 그룹을 찾고, 없으면 만든다 (시드).
 // 해외 채널을 국내와 한 통에 섞으면 발굴 필터에서 갈라 볼 수가 없어서,
@@ -3314,6 +3602,10 @@ app.post('/api/watches', requireAuth, async (req, res) => {
     if (type === 'channel') {
       stored = await resolveChannelId(stored)
       if (!stored) return res.status(400).json({ error: '채널 ID를 찾지 못했어요' })
+      // 같은 채널을 두 번 넣으면 수집이 두 배로 돈다 (제약이 없어 DB 는 막지 않는다)
+      if (await existingWatch('channel', stored)) {
+        return res.status(400).json({ error: '이미 감시 중인 채널이에요' })
+      }
     }
 
     const { data, error } = await supabase

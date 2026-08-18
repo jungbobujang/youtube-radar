@@ -159,7 +159,9 @@
   .g-low { color: #c2554a; }
 
   .m-good, .m-fresh { background: #e1f5ee; color: #085041; }
-  .m-warn, .m-sat, .m-dead { background: #faeeda; color: #633806; }
+  .m-warn, .m-sat { background: #faeeda; color: #633806; }
+  /* 💀 완전 휴면 — 경고(주황)와 갈라 놓는다. 나쁜 신호가 아니라 '멈춘 채널' 이라는 사실 표시다. */
+  .m-dead { background: #eceae4; color: #55534d; }
   /* 아래 둘은 많고 적음이 아니라 성격이 다른 신호라 톤을 따로 쓴다 */
   .m-hot { background: #fbeaf0; color: #72243e; }
   .m-debate { background: #e6f1fb; color: #0c447c; }
@@ -569,7 +571,7 @@ function filterBar(extra = '') {
     </select>
     <select id="f-channel">
       <option value="all">모든 채널</option>
-      ${settings.channels.map((c) => `<option value="${esc(c.value)}" ${digChannel === c.value ? 'selected' : ''}>${esc(c.label)}</option>`).join('')}
+      ${settings.channels.map((c) => `<option value="${esc(c.value)}" ${digChannel === c.value ? 'selected' : ''}>${c.dormant ? dormantMark(c.dormant) + ' ' : ''}${esc(c.label)}</option>`).join('')}
     </select>
     <select id="f-subs">
       ${SUB_OPTS.map(([v, t]) => `<option value="${v}" ${digSubs === v ? 'selected' : ''}>${t}</option>`).join('')}
@@ -918,6 +920,51 @@ function ideaText(b) {
 
 // 해외 영상은 제목을 손대지 않는다. 원문 그대로 두고 표시만 구분한다.
 const isGlobal = (v) => String(v.source ?? '').startsWith('hot:global')
+
+// ---- 💀 휴면 판정 표시
+// 서버(server.js 의 DORMANT)가 판정한 등급만 그린다. 여기서 다시 계산하지 않는다.
+const DORMANT_FACE = { dead: '💀', dormant: '😴' }
+const DORMANT_LABEL = { dead: '완전 휴면', dormant: '휴면' }
+
+// 목록에 작게 붙이는 표식 (감시 관리·발굴 필터용)
+function dormantMark(level) {
+  return level ? DORMANT_FACE[level] ?? '' : ''
+}
+
+function dormantBadge(d) {
+  if (!d?.level) return ''
+  const months = d.months == null ? '' : ` ${d.months}개월`
+  const tip = d.verified
+    ? '유튜브에서 마지막 업로드를 직접 확인한 값'
+    : 'DB 에 쌓인 영상 중 최신 게시일로 추정한 값 (탐사하면 확인됩니다)'
+  return `<span class="m ${d.level === 'dead' ? 'm-dead' : 'm-warn'}" title="${esc(tip)}">
+    ${DORMANT_FACE[d.level]} ${DORMANT_LABEL[d.level]}${months}${d.verified ? '' : ' · 추정'}</span>`
+}
+
+// 💀 휴면 광산 행 — 주제는 통했는데 사람이 떠난 채널. 캐 올 것은 과거뿐이다.
+function dormantRow(d) {
+  return `<div class="row hot-ch">
+    <div class="meta">
+      <span class="title">${dormantMark(d.level)} ${esc(d.channel_title || d.channel_id)}</span>
+      <div class="sub">
+        ${dormantBadge(d)}
+        <span>구독 ${shortNum(d.subscriber_count)}</span>
+        <span class="m" title="이 채널에서 가장 크게 터진 영상">최고 ${shortNum(d.best_views)}</span>
+        ${d.watched ? '<span class="m">감시 중</span>' : ''}
+      </div>
+      ${(d.hits ?? []).map((h) => `<div class="hot-hit">
+        <a href="https://www.youtube.com/watch?v=${esc(h.video_id)}" target="_blank" rel="noopener noreferrer">${esc(h.title)}</a>
+        <span class="muted">${shortNum(h.views)}</span>
+      </div>`).join('')}
+    </div>
+    <div class="tools">
+      ${d.watched
+        ? '<span class="muted">이미 감시 중</span>'
+        : `<button class="btn btn-sm" data-mine="${esc(d.channel_id)}"
+             data-label="${esc(d.channel_title || '')}">⛏ 백카탈로그 채굴</button>`}
+    </div>
+  </div>`
+}
 
 // 채널 추적은 반복 검증된 채널만 받는다. '광맥 N개' 가 그 근거라 제일 앞에 둔다.
 function hotChannelRow(c) {
@@ -1610,6 +1657,23 @@ async function render() {
               v, metricBadges(v, coverageChip(v)) + ideaButton(v), { noRel: true }
             )).join('')
           : '<p class="empty">해외 탐사 결과가 아직 없어요.</p>'}
+
+        <h3 class="sec">💀 휴면 광산
+          <span class="muted">멈춘 채널의 검증된 과거</span></h3>
+        <p class="muted" style="margin:0 0 8px">
+          마지막 업로드가 <b>${h.dormant_rule?.min_days ?? 90}일</b> 넘게 없는데 히트작
+          (조회수가 구독자의 ${h.dormant_rule?.hit_reach ?? 3}배 이상 또는
+          ${shortNum(h.dormant_rule?.hit_views ?? 500000)} 이상)이 있는 채널입니다.
+          주제는 이미 통했고 경쟁자는 떠났습니다 —
+          <b>${DORMANT_FACE.dormant} 휴면</b>은 3~12개월,
+          <b>${DORMANT_FACE.dead} 완전 휴면</b>은 1년 이상입니다.
+          ${h.dormant_rule?.backlog_only_ready === false
+            ? '<br><b>⚠ TODO-SQL.md 0-H 미실행</b> — 지금 채굴하면 신작 감시까지 함께 켜집니다.'
+            : '채굴하면 <b>신작은 보지 않고</b> 과거만 캡니다(1회성 비용).'}
+        </p>
+        ${h.dormant?.length
+          ? h.dormant.map(dormantRow).join('')
+          : '<p class="empty">아직 걸린 휴면 채널이 없어요. [🔥 지금 탐사]를 돌리면 판정합니다.</p>'}
       `
 
       wireRows(panel)
@@ -1631,6 +1695,28 @@ async function render() {
             if (r.group_error) toast(panel, `감시엔 넣었지만 그룹 배정은 실패했어요 — ${r.group_error}`)
           } catch (e) {
             b.disabled = false
+            toast(panel, e.message)
+          }
+        }
+      })
+      // ⛏ 채굴 — 감시에 넣되 신작은 보지 않는 모드. 과거만 한 번 캐 온다.
+      panel.querySelectorAll('[data-mine]').forEach((b) => {
+        b.onclick = async () => {
+          b.disabled = true
+          b.textContent = '채굴 등록 중…'
+          try {
+            const r = await api('/api/hot/mine', {
+              method: 'POST',
+              body: JSON.stringify({ channel_id: b.dataset.mine, label: b.dataset.label })
+            })
+            b.textContent = r.backlog_only ? '✅ 채굴 대기' : '✅ 감시 추가(신작 포함)'
+            toast(panel, r.backlog_only
+              ? '다음 수집부터 과거 영상을 캐 옵니다 — 발굴 탭에 합류합니다.'
+              : 'backlog_only 컬럼이 없어 일반 감시로 넣었어요 (TODO-SQL.md 0-H).')
+            if (r.group_error) toast(panel, `그룹 배정 실패 — ${r.group_error}`)
+          } catch (e) {
+            b.disabled = false
+            b.textContent = '⛏ 백카탈로그 채굴'
             toast(panel, e.message)
           }
         }
@@ -1709,7 +1795,7 @@ async function render() {
       return
     }
 
-    const { watches, lastRun, growth } = await api('/api/watches')
+    const { watches, lastRun, growth, dormancy } = await api('/api/watches')
     const { groups, links } = await api('/api/groups')
     settings.groups = groups
 
@@ -1819,8 +1905,9 @@ async function render() {
         ${items.length ? items.map((w) => `
           <div class="row ${w.active ? '' : 'off'}">
             <div class="meta">
-              <span class="title">📺 ${esc(w.label || w.value)}</span>
+              <span class="title">${dormancy?.[w.value] ? dormantMark(dormancy[w.value].level) : '📺'} ${esc(w.label || w.value)}${w.backlog_only ? ' <span class="muted">⛏ 과거만</span>' : ''}</span>
               <div class="gchips">
+                ${dormantBadge(dormancy?.[w.value])}
                 ${growthChip(growth?.[w.value])}
                 ${(settings.groups ?? []).map((g) => `
                   <button class="chip-g ${memberOf(w.id).has(g.id) ? 'chip-g-on' : ''}"
