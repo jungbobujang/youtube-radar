@@ -40,6 +40,8 @@
     background: var(--ink); color: var(--bg); border-radius: 9px; font-size: 17px;
   }
 
+  /* 라벨은 절대 접지 않는다. 접히면 '승격' 이 '승/격' 으로 쌓여 행 높이가 들쭉날쭉해진다. */
+  .btn, .btn-ghost { white-space: nowrap; }
   .btn {
     background: var(--ink); color: #fff; border: none;
     border-radius: var(--radius); padding: 9px 16px; font-weight: 600;
@@ -78,10 +80,18 @@
      선언을 통째로 버려서, 글자 폭이 0 으로 수렴하는 사고가 난다. */
   .meta { flex: 1 1 0%; min-width: 0; max-width: 100%; }
   /* 위계: 제목(진하게) > 채널(중간) > 나머지 메타(연하게) */
+  /* 제목은 어느 폭에서든 두 줄까지. 한 줄 말줄임으로 두면 넓은 화면에서도
+     제목이 잘려 무슨 영상인지 모른다 (훑는 화면이라 제목이 제일 중요하다).
+     -webkit-box 는 지원할 때만 켠다 — 지원하지 않는 브라우저에서 켜 두면 깨진다. */
   .title {
     display: block; min-width: 0; max-width: 100%;
     font-size: 14.5px; font-weight: 600; color: var(--ink); line-height: 1.4;
-    text-decoration: none; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+    text-decoration: none; overflow: hidden;
+  }
+  @supports (-webkit-line-clamp: 2) {
+    .title {
+      display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
+    }
   }
   .title:hover { text-decoration: underline; }
   .sub { font-size: 12px; color: var(--ink-faint); display: flex; gap: 8px; flex-wrap: wrap; margin-top: 2px; min-width: 0; }
@@ -342,6 +352,37 @@
   .state h4 { margin: 0 0 5px; font-size: 14.5px; color: var(--ink); }
   .state p { margin: 0 0 12px; font-size: 13px; color: var(--ink-faint); }
 
+  /* ---------------------------------------------------------------- 데스크톱 (769px~)
+     한 줄 배치 — 썸네일 | 제목·채널·조회·날짜 | 지표 뱃지 | 버튼.
+     880px 컨테이너에서는 지표(296px 고정) + 버튼 5개가 700px 가까이 먹어 제목 칸이
+     36~117px 로 짜부라졌다 (제목이 "남들에…" 로만 보이고 메타가 세로로 쌓이던 버그).
+     둘을 같이 고친다 — 컨테이너를 넓히고, 제목 칸에 최소 폭을 줘서 자리가 모자라면
+     지표 쪽이 먼저 줄바꿈하도록 우선순위를 뒤집는다. */
+  @media (min-width: 769px) {
+    .wrap { max-width: 1240px; }
+    /* 제목 칸이 먼저 자리를 갖는다. min-width 가 없으면 flex 가 0 까지 밀어 버린다. */
+    .meta { flex: 1 1 auto; min-width: 140px; }
+    /* 지표·버튼 묶음은 이제 줄어들 수 있다 (flex: none 이던 것이 사고의 절반이었다).
+       단 min-width 는 auto(=min-content) 로 둔다 — 0 으로 두면 묶음이 제 내용보다
+       작게 줄어들어 버튼이 오른쪽으로 삐져나간다 (안 줄어드는 것과 반대 방향의 같은 사고). */
+    .tools { flex: 0 1 auto; min-width: auto; }
+    /* 296px 는 이제 '되도록 이 폭' 이지 고정이 아니다. 모자라면 뱃지가 줄바꿈한다. */
+    .metrics { flex: 0 1 296px; }
+  }
+  /* 노트북 폭(~1179px)에서는 버튼 라벨을 뗀다. 라벨 5개가 450px 를 먹어
+     제목·지표가 동시에 굶는다 (라벨은 title 속성에 남아 있다). */
+  @media (max-width: 1179px) {
+    .lbl { display: none; }
+  }
+  /* 넉넉한 화면에서는 지표에도 바닥을 줘서 뱃지가 한 개씩 세로로 흘러
+     행이 두 배로 높아지는 것을 막는다.
+     제목 칸에는 바닥을 더 얹지 않는다 — 셋(제목·지표·버튼)에 전부 최소폭을 주면
+     합이 화면을 넘어 버튼이 오른쪽으로 잘려 나간다 (1024px 에서 실제로 그랬다).
+     버튼은 줄어들 수 없으니, 남는 자리는 제목이 알아서 가져간다. */
+  @media (min-width: 1024px) {
+    .metrics { min-width: 220px; }
+  }
+
   /* ---------------------------------------------------------------- 터치 (~768px)
      태블릿 세로(768)까지는 손가락으로 누른다고 본다. 누르는 것은 전부 44px 이상. */
   @media (max-width: 768px) {
@@ -375,28 +416,11 @@
     .ctag-x { min-width: 32px; justify-content: center; }
     .ctag-in { min-height: 36px; font-size: 14px; }
 
-    /* 버튼이 44px 로 커진 만큼 제목이 밀린다. 라벨을 떼고 지표 폭을 줄여
-       제목이 볼 자리를 되찾는다 (라벨은 title 속성에 남아 있다). */
-    .lbl { display: none; }
-    .tools { flex: 0 1 auto; min-width: 0; }
-    /* 후보함 행은 버튼이 4개(💡★🤍🔎)라 지표 폭을 더 줄여야 제목이 산다.
-       flex-end 인 채로 넘치면 앞쪽이 왼쪽으로 잘려 스크롤로도 닿지 않는다 → flex-start. */
-    .metrics { flex: 0 1 auto; max-width: 200px; overflow-x: auto; flex-wrap: nowrap;
-               justify-content: flex-start;
-               scrollbar-width: none; -webkit-overflow-scrolling: touch; }
-    .metrics::-webkit-scrollbar { display: none; }
-    .metrics > .m, .metrics > .tchips { flex: none; }
-  }
-
-  /* ---------------------------------------------------------------- 모바일 (~640px)
-     영상 행은 2줄로 접는다 — 1줄 썸네일+제목, 2줄 지표 뱃지+버튼.
-     한 줄에 다 욱여넣으면 제목이 짜부라지고, 형제들이 제각각 줄바꿈하면
-     썸네일만 한 줄을 차지한다. 그래서 flex 대신 grid 로 자리를 못박는다. */
-  @media (max-width: 640px) {
-    body { font-size: 14.5px; }
-    .wrap { padding: 12px 12px 72px; }
-
     /* --- 영상 행: 2줄 그리드 (썸네일 96px + 나머지 전부)
+       1줄 = 썸네일 + 제목, 2줄 = 지표 뱃지 + 버튼.
+       버튼이 44px 로 커진 만큼 한 줄에 다 욱여넣으면 제목이 짜부라지고,
+       형제들이 제각각 줄바꿈하면 썸네일만 한 줄을 차지한다.
+       그래서 flex 대신 grid 로 자리를 못박는다.
        두 컬럼을 span 하는 .tools 에 min-width:0 이 없으면, 뱃지 스트립의
        min-content 가 그리드를 밀어 1fr 컬럼(제목 자리)을 0 으로 만든다.
        크롬은 남는 폭을 제목에 남겨 뒀지만 iOS Safari 는 0 까지 밀어버려
@@ -414,34 +438,38 @@
       grid-column: 1 / -1; grid-row: 2; gap: 6px;
       min-width: 0; max-width: 100%; overflow: hidden;
     }
+    /* grid 를 못 쓰는 환경(구형 웹뷰)을 위한 안전망 — flex 로도 2줄이 되게 둔다.
+       grid 가 켜지면 아래 두 줄은 무시된다. */
+    .row-v { flex-wrap: wrap; }
+    .row-v .tools { flex: 1 0 100%; }
 
-    /* 제목은 두 줄까지. -webkit-box 는 지원할 때만 켠다 —
-       지원하지 않는 브라우저에서 켜 두면 한 줄 말줄임조차 깨진다. */
-    .title { white-space: normal; overflow: hidden; }
-    @supports (-webkit-line-clamp: 2) {
-      .title {
-        display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical;
-      }
-    }
-    .sub { gap: 6px; font-size: 11.5px; min-width: 0; }
-
-    /* 지표 뱃지는 한 줄 가로 스크롤. 부모(.tools) 폭 안에 갇힌다. */
+    /* 지표 뱃지는 한 줄 가로 스크롤. 부모(.tools) 폭 안에 갇힌다.
+       flex-end 인 채로 넘치면 앞쪽이 왼쪽으로 잘려 스크롤로도 닿지 않는다 → flex-start. */
     .metrics {
       flex: 1 1 0%; min-width: 0; max-width: 100%; width: 100%;
       flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start;
       -webkit-overflow-scrolling: touch; scrollbar-width: none; padding-bottom: 2px;
     }
     .metrics::-webkit-scrollbar { display: none; }
-    .metrics > .m { flex: none; }
+    .metrics > .m, .metrics > .tchips { flex: none; }
+  }
 
-    /* grid 를 못 쓰는 환경(구형 웹뷰)을 위한 안전망 — flex 로도 2줄이 되게 둔다.
-       grid 가 켜지면 아래 두 줄은 무시된다. */
-    .row-v { flex-wrap: wrap; }
-    .row-v .tools { flex: 1 0 100%; }
+  /* ---------------------------------------------------------------- 모바일 (~640px)
+     영상 행 2줄 구조는 위 768px 블록이 맡는다. 여기는 폰 폭에서만 필요한
+     글자 크기·카드화·가로 스크롤 칩 줄을 얹는다. */
+  @media (max-width: 640px) {
+    body { font-size: 14.5px; }
+    .wrap { padding: 12px 12px 72px; }
+
+    .sub { gap: 6px; font-size: 11.5px; min-width: 0; }
     .m { font-size: 11px; padding: 4px 9px; }
 
+    /* 필터 줄의 버튼만 다시 접히게 둔다. '🔥 지금 탐사 (약 608유닛)' 처럼 긴 라벨이
+       폰 폭에 한 줄로 안 들어가 화면을 옆으로 밀어낸다. 행 안의 버튼은 nowrap 그대로 —
+       거기서 접히면 행 높이가 들쭉날쭉해진다. */
+    .filters > .btn, .filters > .btn-ghost { white-space: normal; }
+
     /* 버튼은 아이콘만 남겨 지표가 볼 자리를 확보한다 (라벨은 title 속성에) */
-    .lbl { display: none; }
     .tools .btn-sm { padding: 0 10px; font-size: 16px; }
 
     /* --- 필터: 가로 스크롤 칩 줄 */
@@ -714,9 +742,12 @@ function videoRow(v, extra = '', opts = {}) {
   const star = opts.tools ?? `
     <button class="star ${Number(v.pick_level ?? 0) >= 1 ? 'star-on' : ''}" data-star="${esc(v.video_id)}"
             aria-label="후보로 담기" title="후보로 담기 (목록에서 빠집니다)">★</button>`
-  const tools = opts.noTools ? '' : `${star}
+  // noRel — 🔎 관련은 그 영상 주제로 국내를 다시 검색하는 버튼이다. 해외 광맥 목록처럼
+  // '수확만 하는' 자리에서는 뺀다 (거기서 할 일은 ⭐ 담기와 💡 아이디어로 두 가지뿐).
+  const rel = opts.noRel ? '' : `
     <button class="btn-ghost btn-sm rel" data-rel="${esc(v.video_id)}" title="관련 주제">
       🔎<span class="lbl"> 관련</span></button>`
+  const tools = opts.noTools ? '' : `${star}${rel}`
   return `<div class="row row-v">
     <img class="thumb" loading="lazy" src="https://img.youtube.com/vi/${esc(v.video_id)}/mqdefault.jpg" alt="">
     <div class="meta">
@@ -888,11 +919,15 @@ function ideaText(b) {
 // 해외 영상은 제목을 손대지 않는다. 원문 그대로 두고 표시만 구분한다.
 const isGlobal = (v) => String(v.source ?? '').startsWith('hot:global')
 
+// 채널 추적은 반복 검증된 채널만 받는다. '광맥 N개' 가 그 근거라 제일 앞에 둔다.
 function hotChannelRow(c) {
+  const n = c.outliers ?? 0
   return `<div class="row hot-ch">
     <div class="meta">
       <span class="title">${c.global ? '🌍 ' : ''}${esc(c.channel_title || c.channel_id)}</span>
       <div class="sub">
+        <span class="m ${n >= 2 ? 'm-good' : ''}"
+          title="조회수가 구독자 수를 넘긴(또는 5만+) 영상 수 — 탐사 누적">광맥 ${n}개 발견</span>
         <span>구독 ${shortNum(c.subscriber_count)}</span>
         ${c.reach != null ? `<span class="m" title="대표작 조회수 / 구독자수">침투 ${c.reach}</span>` : ''}
         <span>걸린 영상 ${c.found}편</span>
@@ -904,7 +939,8 @@ function hotChannelRow(c) {
     </div>
     <div class="tools">
       <button class="btn btn-sm" data-watch-add="${esc(c.channel_id)}"
-        data-label="${esc(c.channel_title || '')}">+ 감시 추가</button>
+        data-label="${esc(c.channel_title || '')}"
+        data-global="${c.global ? '1' : ''}">+ 감시 추가</button>
     </div>
   </div>`
 }
@@ -1553,29 +1589,46 @@ async function render() {
           ? h.trending.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
           : '<p class="empty">최근 90일에 배율이 뜬 영상이 아직 없어요.</p>'}
 
-        <h3 class="sec">📺 추천 채널 <span class="muted">감시망 밖 · 구독자 대비 아웃라이어</span></h3>
+        <h3 class="sec">📺 추천 채널 <span class="muted">감시망 밖 · 반복해서 광맥이 나온 채널</span></h3>
+        <p class="muted" style="margin:0 0 8px">
+          국내 채널은 광맥 1개로도 올라오고, 🌍 해외 채널은 탐사 누적으로
+          <b>광맥 ${h.global_promote ?? 2}개 이상</b> 걸려야 올라옵니다.
+          채널 추적은 여기서만 시작합니다.
+        </p>
         ${h.channels.length
           ? h.channels.map(hotChannelRow).join('')
           : '<p class="empty">탐사로 걸린 새 채널이 없어요. [🔥 지금 탐사]를 눌러 보세요.</p>'}
 
         <h3 class="sec">🌍 해외 광맥
           <span class="muted">${h.pairs.map((p) => esc(p.en)).join(' · ')}</span></h3>
+        <p class="muted" style="margin:0 0 8px">
+          여기는 <b>영상 단위</b>로만 봅니다 — ⭐ 로 담고 💡 로 아이디어를 수확하세요.
+          같은 채널이 ${h.global_promote ?? 2}번 걸리면 위 [📺 추천 채널]로 올라옵니다.
+        </p>
         ${h.global.length
-          ? h.global.map((v) => videoRow(v, metricBadges(v, coverageChip(v)) + ideaButton(v))).join('')
+          ? h.global.map((v) => videoRow(
+              v, metricBadges(v, coverageChip(v)) + ideaButton(v), { noRel: true }
+            )).join('')
           : '<p class="empty">해외 탐사 결과가 아직 없어요.</p>'}
       `
 
       wireRows(panel)
       wirePickedToggle()
+      // 감시에 들어가면 국내 채널과 똑같이 신작·백카탈로그 수집 대상이 된다.
+      // 해외 채널만 🌍 해외 그룹에 미리 넣어 둔다 (없으면 서버가 만든다).
       panel.querySelectorAll('[data-watch-add]').forEach((b) => {
         b.onclick = async () => {
           b.disabled = true
           try {
-            await api('/api/watches', {
+            const r = await api('/api/watches', {
               method: 'POST',
-              body: JSON.stringify({ type: 'channel', value: b.dataset.watchAdd, label: b.dataset.label })
+              body: JSON.stringify({
+                type: 'channel', value: b.dataset.watchAdd, label: b.dataset.label,
+                ...(b.dataset.global ? { group: { name: '해외', icon: '🌍' } } : {})
+              })
             })
-            b.textContent = '✅ 감시 중'
+            b.textContent = r.group_name ? `✅ 감시 중 · 🌍 ${r.group_name}` : '✅ 감시 중'
+            if (r.group_error) toast(panel, `감시엔 넣었지만 그룹 배정은 실패했어요 — ${r.group_error}`)
           } catch (e) {
             b.disabled = false
             toast(panel, e.message)

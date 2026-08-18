@@ -1621,6 +1621,11 @@ const HOT = {
   OUTLIER_REACH: 1,      // 아웃라이어 기준 — 조회수가 구독자 수보다 많을 것
   OUTLIER_VIEWS: 50000,  // 구독자를 모를 때 대신 볼 최소 조회수
   TOP: 30,               // 섹션별 최대 표시 수
+  // 해외 채널을 '추천 채널' 로 올리는 최소 광맥 수. 국내는 1개로도 올린다.
+  // 해외는 검색 한 번에 처음 보는 채널이 수십 개씩 딸려 온다. 그중 한 편이 터진 것은
+  // 그 주제가 터진 것이지 그 채널이 좋은 것이 아니다. 탐사 누적으로 두 번 걸려야
+  // '이 채널이 계속 파는 광맥' 이라고 본다 — 감시는 반복 검증된 채널만 받는다.
+  GLOBAL_PROMOTE: 2,
   // 검색을 viewCount 순으로 하면 해시태그 쇼츠가 화면을 통째로 덮는다.
   // 우리 전략은 롱폼이라 3분 이하(shorts·mid)는 걸러 낸다.
   FORMATS: ['long']
@@ -2837,7 +2842,13 @@ app.get('/api/hot', requireAuth, async (req, res) => {
       .filter((v) => !watched.has(v.channel_id))
       .filter((v) => HOT.FORMATS.includes(v.format))
 
-    // 2) 📺 추천 채널 — 영상이 아니라 채널 단위로 묶는다
+    // 광맥 판정 — 구독자보다 많이 본 영상, 구독자를 모르면 조회수로 대신 본다.
+    // 채널 승격과 해외 영상 목록이 같은 잣대를 써야 '광맥 N개' 가 화면과 맞는다.
+    const isOutlier = (v) => (v.reach ?? 0) >= HOT.OUTLIER_REACH ||
+      Number(v.views ?? 0) >= HOT.OUTLIER_VIEWS
+
+    // 2) 📺 추천 채널 — 영상이 아니라 채널 단위로 묶는다.
+    //    국내는 광맥 1개로도 올리고, 해외는 GLOBAL_PROMOTE 개 이상 쌓여야 올린다.
     const byChannel = new Map()
     for (const v of hot) {
       if (!v.channel_id) continue
@@ -2847,28 +2858,31 @@ app.get('/api/hot', requireAuth, async (req, res) => {
     const channels = [...byChannel.entries()].map(([id, vids]) => {
       const sorted = vids.sort((a, b) => Number(b.views ?? 0) - Number(a.views ?? 0))
       const subs = Number(chans.get(id)?.subscriber_count ?? 0)
+      const outliers = sorted.filter(isOutlier)
       return {
         channel_id: id,
         channel_title: sorted[0].channel_title,
         subscriber_count: subs,
         reach: subs > 0 ? Number((Number(sorted[0].views ?? 0) / subs).toFixed(2)) : null,
         found: vids.length,
+        outliers: outliers.length,
         global: sorted.some((v) => String(v.source).startsWith('hot:global')),
-        hits: sorted.slice(0, 2).map((v) => ({
+        // 대표작은 광맥부터 보여 준다 (승격 근거가 그것이라서)
+        hits: (outliers.length > 0 ? outliers : sorted).slice(0, 2).map((v) => ({
           video_id: v.video_id, title: v.title, views: Number(v.views ?? 0)
         }))
       }
     })
-      .filter((c) => (c.reach ?? 0) >= HOT.OUTLIER_REACH ||
-        Number(c.hits[0]?.views ?? 0) >= HOT.OUTLIER_VIEWS)
-      .sort((a, b) => (b.reach ?? 0) - (a.reach ?? 0))
+      .filter((c) => (c.global ? c.outliers >= HOT.GLOBAL_PROMOTE : c.outliers >= 1))
+      // 반복 검증된 채널(광맥 수)이 먼저, 같으면 침투력 순
+      .sort((a, b) => b.outliers - a.outliers || (b.reach ?? 0) - (a.reach ?? 0))
       .slice(0, HOT.TOP)
 
     // 3) 🌍 해외 광맥 — 아웃라이어만. 같은 주제를 국내에서 이미 몇 곳이 다뤘는지 붙인다.
+    //    여기는 채널이 아니라 '영상' 을 본다. 채널 추적은 위 2) 를 거쳐야 한다.
     const globalRows = hot
       .filter((v) => String(v.source).startsWith('hot:global:'))
-      .filter((v) => (v.reach ?? 0) >= HOT.OUTLIER_REACH ||
-        Number(v.views ?? 0) >= HOT.OUTLIER_VIEWS)
+      .filter(isOutlier)
       .map((v) => ({ ...v, hot_term: String(v.source).split(':')[2] ?? '' }))
 
     // 국내 커버리지는 '영상별' 이 아니라 '검색어별' 로 한 번만 잰다 (같은 말로 찾은 것들이라)
@@ -2894,6 +2908,7 @@ app.get('/api/hot', requireAuth, async (req, res) => {
       trending: trendingOut,
       channels,
       global: hidePicked(globalRows, req).slice(0, HOT.TOP),
+      global_promote: HOT.GLOBAL_PROMOTE,
       last_prospect_at: lastHotAt || null,
       cost: hotCost(),
       pairs: HOT_KEYWORD_PAIRS.slice(0, HOT.EN_TERMS).map(([ko, en]) => ({ ko, en }))
@@ -3205,9 +3220,25 @@ app.get('/api/watches', requireAuth, async (req, res) => {
   res.json({ watches: data ?? [], lastRun, growth: await channelGrowth() })
 })
 
+// 이름으로 그룹을 찾고, 없으면 만든다 (시드).
+// 해외 채널을 국내와 한 통에 섞으면 발굴 필터에서 갈라 볼 수가 없어서,
+// 감시에 넣는 순간 🌍 해외 그룹에 넣어 둔다.
+async function seedGroup(name, icon) {
+  const { data: found } = await supabase
+    .from('yt_groups').select('id').eq('name', name).limit(1)
+  if (found?.length > 0) return found[0].id
+
+  const { data: cur } = await supabase.from('yt_groups').select('position')
+  const position = (cur ?? []).reduce((m, g) => Math.max(m, g.position ?? 0), 0) + 1
+  const { data, error } = await supabase
+    .from('yt_groups').insert({ name, icon: icon || '📁', position }).select().single()
+  if (error) throw error
+  return data.id
+}
+
 app.post('/api/watches', requireAuth, async (req, res) => {
   try {
-    const { type, value, label } = req.body ?? {}
+    const { type, value, label, group } = req.body ?? {}
     const TYPES = ['keyword', 'channel', 'include_kw', 'exclude_kw', 'category', 'setting']
     if (!TYPES.includes(type) || !value?.trim()) {
       return res.status(400).json({ error: '입력을 확인해 주세요' })
@@ -3225,6 +3256,21 @@ app.post('/api/watches', requireAuth, async (req, res) => {
       .select()
       .single()
     if (error) throw error
+
+    // 그룹 배정은 덤이다. 여기서 넘어져도 감시 추가 자체를 되돌리지는 않는다
+    // (채널은 이미 들어갔으니 수집은 돈다). 실패는 응답에 적어 화면이 알려 준다.
+    if (type === 'channel' && group?.name) {
+      try {
+        const groupId = await seedGroup(String(group.name).trim(), group.icon)
+        const { error: linkErr } = await supabase
+          .from('yt_watch_groups')
+          .upsert({ watch_id: data.id, group_id: groupId }, { onConflict: 'watch_id,group_id' })
+        if (linkErr) throw linkErr
+        data.group_name = String(group.name).trim()
+      } catch (gerr) {
+        data.group_error = gerr.message
+      }
+    }
     res.json(data)
   } catch (err) {
     res.status(500).json({ error: err.message })
