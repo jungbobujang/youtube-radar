@@ -78,6 +78,31 @@ function readUnitsToday() {
   return readUnitsFile().units
 }
 
+// ---- 마지막 수집 기록
+// 메모리에만 두면 배포·재시작 때마다 '마지막 수집 없음' 으로 되돌아간다.
+// 실제로는 수집이 돌았는데 화면만 안 돈 것처럼 보여서, 감시가 멈춘 줄 알고 손이 간다.
+// units 파일과 같은 방식으로 디스크에 남기고 부팅할 때 되읽는다.
+const LAST_RUN_FILE = path.join(LOG_DIR, 'last-run.json')
+
+function readLastRun() {
+  try {
+    const j = JSON.parse(fs.readFileSync(LAST_RUN_FILE, 'utf8'))
+    return j?.at ? j : null // at 이 없으면 못 쓰는 기록이다
+  } catch {
+    return null // 이 서버에서 아직 한 번도 안 돌았다
+  }
+}
+
+function writeLastRun(run) {
+  try {
+    fs.mkdirSync(LOG_DIR, { recursive: true })
+    fs.writeFileSync(LAST_RUN_FILE, JSON.stringify(run))
+  } catch (err) {
+    // 기록을 못 남겨도 수집 자체는 성공했다. 조용히 삼키지는 않는다.
+    console.warn(`[collect] 마지막 수집 기록 저장 실패: ${err.message}`)
+  }
+}
+
 // source 를 주면 어디에 썼는지도 따로 센다 (댓글 수집이 얼마나 먹는지 상태바에 보이게)
 function addUnitsToday(n, source = 'etc') {
   if (!n) return
@@ -170,6 +195,25 @@ async function unitsTodayFromDb() {
     by[key] = (by[key] || 0) + n
   }
   return { units, by, entries: (data ?? []).length }
+}
+
+// 이 인스턴스가 아직 한 번도 안 돌렸을 때(재배포 직후, 다른 PC에서 처음 띄웠을 때)
+// 공유 장부에서 마지막 수집 시각을 찾아 온다. Railway 는 배포마다 디스크가 날아가서
+// 파일 기록만으로는 늘 '없음' 이 된다 — 실제로는 돌고 있는데도.
+// 장부가 아는 것은 시각과 유닛뿐이라 videos·errors 는 비운다 (없으면 화면이 경고를 안 그린다).
+async function lastCollectFromDb() {
+  if (!(await quotaTableReady())) return null
+  const { data, error } = await supabase
+    .from('yt_quota_log').select('used_at, units')
+    .eq('source', 'collect')
+    .order('used_at', { ascending: false })
+    .limit(1)
+  if (error) {
+    console.warn(`[quota] 마지막 수집 조회 실패: ${error.message}`)
+    return null
+  }
+  const row = (data ?? [])[0]
+  return row ? { at: row.used_at, units: Number(row.units) || 0, from_db: true } : null
 }
 
 // 할당량은 앱이 아니라 구글 프로젝트 단위다. 이 문장을 오류마다 같이 내보낸다.
@@ -1173,7 +1217,7 @@ async function recomputeMultiples() {
 
 // ---------------------------------------------------------------- 수집
 
-let lastRun = null
+let lastRun = readLastRun() // 재시작 전에 돌린 수집 기록을 되읽는다
 let collecting = false
 
 // 실패는 한 곳에서 기록한다 (콘솔 + 화면용 report + logs/ 파일).
@@ -1412,6 +1456,7 @@ async function collect(opts = {}) {
     ms: Date.now() - started,
     ...report
   }
+  writeLastRun(lastRun) // 재시작해도 '마지막 수집' 이 남아 있게
   console.log('[collect] 완료', JSON.stringify(lastRun))
   return lastRun
 }
@@ -3884,10 +3929,13 @@ app.get('/api/status', requireAuth, async (req, res) => {
       quota_note: QUOTA_NOTE,
       audition_pending: auditionPending,
       estimate: await estimateDailyUnits(),
-      last_run: lastRun && {
-        at: lastRun.at, ms: lastRun.ms, videos: lastRun.videos,
-        units: lastRun.units, errors: lastRun.errors?.length ?? 0, aborted: lastRun.aborted ?? null
-      },
+      // 이 인스턴스 기록이 우선, 없으면 공유 장부에서 시각만이라도 찾아 온다
+      last_run: lastRun
+        ? {
+            at: lastRun.at, ms: lastRun.ms, videos: lastRun.videos,
+            units: lastRun.units, errors: lastRun.errors?.length ?? 0, aborted: lastRun.aborted ?? null
+          }
+        : await lastCollectFromDb(),
       total_videos: count ?? 0,
       units_today: units,
       quota_limit: QUOTA_LIMIT,
