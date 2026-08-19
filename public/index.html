@@ -336,6 +336,91 @@
   }
   .hide { display: none; }
 
+  /* ---------------------------------------------------------------- 💎 갱도 칩
+     탭이 4개로 줄어든 대신, 광산 안에서 무엇을 캐는지는 이 칩 줄이 정한다.
+     탭(밑줄)과 생김새를 일부러 다르게 둔다 — 같은 위계로 보이면 탭이 7개로 되돌아간 것처럼 읽힌다. */
+  .shafts { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 12px; }
+  .shaft {
+    border: 1px solid var(--line); background: var(--surface); color: var(--ink-soft);
+    border-radius: 999px; padding: 7px 14px;
+    font-size: 13.5px; font-weight: 600; white-space: nowrap;
+  }
+  .shaft:hover { border-color: var(--ink-faint); color: var(--ink); }
+  .shaft-on { background: var(--ink); border-color: var(--ink); color: #fff; }
+  .shaft-on:hover { color: #fff; }
+
+  /* ---------------------------------------------------------------- 뱃지 위계
+     1열(.metrics)에는 종합 판단에 필요한 것만 남긴다 — 배율·참여·포화도(+🅐).
+     배율·참여는 숫자만으로는 좋은지 나쁜지 모르므로 뱃지 바탕을 등급색으로 칠한다. */
+  .m-gr-great { background: #e1f5ee; color: #085041; }
+  .m-gr-low   { background: #f7e8e6; color: #8d2f24; }
+  /* 바탕이 이미 등급색이면 Great/Low 글자까지 색을 달리할 이유가 없다 (읽기만 어려워진다) */
+  .m-gr-great .g, .m-gr-low .g { color: inherit; opacity: .7; }
+
+  /* 채널 활력(쇠락·상승)은 영상이 아니라 채널의 성질이다. 채널명 뒤에만 붙인다. */
+  .vm { font-size: 11px; margin-left: 3px; cursor: help; }
+
+  /* ---------------------------------------------------------------- ⋯ 상세 줄
+     1열에서 뺀 지표(침투·일평균·최근7일·토론형·활력 상세)와
+     기본 노출에서 뺀 동작(관련·댓글)이 여기로 모인다. */
+  .rowdet {
+    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    padding: 8px 6px 10px; margin: 0 -6px;
+    border-bottom: 1px solid var(--line); background: rgba(255, 255, 255, .5);
+  }
+  /* .hide 는 위쪽에 있어 특정도가 같다 — 나중에 선언된 이 display:flex 가 이겨서
+     접어 둔 상세 줄이 전부 펴진 채로 나왔다. 짝을 지어 다시 눌러 준다. */
+  .rowdet.hide { display: none; }
+  /* 상세 줄은 폭이 넉넉하니 좁은 화면에서도 버튼 글자를 남긴다 (🔎 만 있으면 뭘 하는 건지 모른다) */
+  .rowdet .lbl { display: inline; }
+  /* .metrics 를 재사용하지 않는다 — 좁은 폭에서 .metrics 는 가로 스크롤로 바뀌는데,
+     상세 줄은 한눈에 다 보여야 하는 자리라 줄바꿈이 맞다. */
+  .detm { display: flex; gap: 5px; align-items: center; flex-wrap: wrap; flex: 1 1 220px; min-width: 0; }
+  .det-acts { display: flex; gap: 6px; flex: none; flex-wrap: wrap; }
+  .more { flex: none; }
+  .more[aria-expanded="true"] { background: var(--ink); border-color: var(--ink); color: #fff; }
+
+  /* ---------------------------------------------------------------- 📥 브리핑 */
+  .bcard {
+    background: var(--surface); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px;
+  }
+  .bhead { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+  .bhead h3 { margin: 0; font-size: 14px; font-weight: 700; }
+  .bhead .muted { font-weight: 400; }
+  /* 링크는 항상 오른쪽 끝. 제목이 길어 접히면 다음 줄 오른쪽으로 내려간다. */
+  .go {
+    margin-left: auto; flex: none; background: none; border: none;
+    color: var(--accent); font-size: 12.5px; font-weight: 600; padding: 4px 0;
+    white-space: nowrap;
+  }
+  .go:hover { text-decoration: underline; }
+  /* 카드 안 목록은 카드가 이미 테두리를 가지므로 마지막 줄만 선을 뗀다 */
+  .bcard > .row:last-of-type { border-bottom: none; }
+  .blines { margin: 0; font-size: 13px; color: var(--ink-soft); line-height: 1.9; }
+  .blines b { color: var(--ink); }
+  /* 경고는 이상할 때만 나온다. 평소에도 빨간 글자가 있으면 진짜일 때 안 보인다. */
+  .blines .wa { color: var(--danger); }
+  .bstat { border-top: 1px solid var(--line); padding-top: 10px; margin-top: 2px; }
+  .quiet { text-align: center; padding: 30px 16px; font-size: 15px; color: var(--ink-soft); }
+
+  /* ---------------------------------------------------------------- 접이식 묶음
+     신작의 '이 채널 N건 더', 관리 탭의 추적 중·주간 리포트가 같이 쓴다. */
+  .more-ch {
+    border: 1px dashed var(--line); border-radius: var(--radius);
+    padding: 0 12px; margin: 0 0 8px; background: var(--surface);
+  }
+  .more-ch > summary { cursor: pointer; font-size: 12.5px; color: var(--ink-soft); padding: 8px 0; }
+  .more-ch > summary:hover { color: var(--ink); }
+  .more-ch[open] > summary { border-bottom: 1px solid var(--line); margin-bottom: 4px; }
+  .sec-box {
+    border: 1px solid var(--line); border-radius: var(--radius);
+    background: var(--surface); padding: 0 14px; margin-bottom: 10px;
+  }
+  .sec-box > summary { cursor: pointer; font-size: 14px; font-weight: 700; padding: 11px 0; }
+  .sec-box[open] > summary { border-bottom: 1px solid var(--line); }
+  .sec-body { padding: 8px 0 12px; }
+
   /* ---------------------------------------------------------------- 상태바 */
   .statusbar {
     display: flex; align-items: center; gap: 6px 14px; flex-wrap: wrap;
@@ -424,6 +509,14 @@
     .fmt-ov { min-height: 44px; font-size: 13px; padding: 0 8px; }
     .chip-g { min-height: 44px; padding: 0 12px; display: inline-flex; align-items: center; font-size: 15px; }
     .chip-kw { min-height: 44px; padding: 0 14px; display: inline-flex; align-items: center; }
+    /* 갱도 칩·접이식 머리글·"전체 보기" 도 누르는 자리다 */
+    .shaft { min-height: 44px; padding: 0 16px; display: inline-flex; align-items: center; font-size: 14px; }
+    /* gap 이 없으면 flex 가 제목과 설명 사이 공백 텍스트 노드를 지워
+       '주간 리포트지난 7일 요약' 처럼 붙어 버린다 */
+    .more-ch > summary, .sec-box > summary {
+      min-height: 44px; display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+    }
+    .go { min-height: 44px; display: inline-flex; align-items: center; font-size: 13px; }
     /* 체크박스는 라벨 전체가 누르는 자리다. 라벨을 44px 로 키운다. */
     .cat { min-height: 44px; }
     .cat input { width: 20px; height: 20px; }
@@ -433,6 +526,10 @@
     }
     .tools .star { font-size: 22px; padding: 0 8px; }
     .tools .heart { font-size: 18px; padding: 0 8px; }
+    /* 상세 줄 버튼은 .tools 밖이라 위 규칙을 못 탄다. 따로 44px 를 준다. */
+    .det-acts .btn-sm {
+      min-height: 44px; display: inline-flex; align-items: center; justify-content: center;
+    }
     .tchip { min-width: 44px; min-height: 44px; font-size: 14px; }
     /* 태그는 눌러서 지우는 자리라 손가락 크기를 지킨다 */
     .ctag-go, .ctag-x { min-height: 36px; font-size: 13px; display: inline-flex; align-items: center; }
@@ -466,10 +563,15 @@
     .row-v { flex-wrap: wrap; }
     .row-v .tools { flex: 1 0 100%; }
 
-    /* 지표 뱃지는 한 줄 가로 스크롤. 부모(.tools) 폭 안에 갇힌다.
-       flex-end 인 채로 넘치면 앞쪽이 왼쪽으로 잘려 스크롤로도 닿지 않는다 → flex-start. */
+    /* 지표 뱃지와 버튼을 한 줄에 같이 두면, 버튼이 전부 44px 라 지표가 남는 폭을 갖는다.
+       예심 행(승격·킵·제외·💡·⋯)에서는 그 남는 폭이 30px 남짓이라 1열 뱃지가
+       사실상 사라졌다 — '항상 보이는 열' 이 안 보이면 위계를 나눈 뜻이 없다.
+       그래서 지표에 한 줄을 통째로 주고 버튼을 다음 줄로 내린다. */
+    .row-v .tools { flex-wrap: wrap; }
+    /* 지표 뱃지는 제 줄 안에서 가로 스크롤. flex-end 인 채로 넘치면 앞쪽이 왼쪽으로
+       잘려 스크롤로도 닿지 않는다 → flex-start. */
     .metrics {
-      flex: 1 1 0%; min-width: 0; max-width: 100%; width: 100%;
+      flex: 1 1 100%; min-width: 0; max-width: 100%; width: 100%; order: -1;
       flex-wrap: nowrap; overflow-x: auto; justify-content: flex-start;
       -webkit-overflow-scrolling: touch; scrollbar-width: none; padding-bottom: 2px;
     }
@@ -523,6 +625,18 @@
 
     .hits { max-width: 100%; }
     .notice { font-size: 12px; }
+
+    /* 브리핑 — 카드 여백을 줄여 한 화면에 두 칸이 들어오게 */
+    .bcard { padding: 10px 12px; }
+    .blines { font-size: 12.5px; line-height: 1.85; }
+    /* 제목이 길면 "전체 보기 →" 가 다음 줄로 내려간다. margin-left:auto 는 그대로 둔다. */
+    .bhead h3 { flex: 1 1 auto; min-width: 0; }
+
+    /* 상세 줄 — 지표 한 덩어리, 동작 한 덩어리로 세로로 쌓는다 */
+    .rowdet { padding: 8px 6px 10px; gap: 8px; }
+    .detm { flex: 1 1 100%; }
+    .det-acts { flex: 1 1 100%; }
+    .det-acts .btn-sm { flex: 1 1 0%; }
     .rel-kw { flex: 1 1 100%; min-height: 44px; }
     .rel-head .btn-sm, .rel-head .btn { flex: 1 1 auto; }
 
@@ -545,7 +659,7 @@
 
 <div id="app" class="wrap hide">
   <div class="topbar">
-    <button class="brand" id="home" title="처음으로 (발굴 탭 · 필터 초기화 · 새로고침)">
+    <button class="brand" id="home" title="처음으로 (브리핑 탭 · 갱도·필터 초기화 · 새로고침)">
       <span class="brand-mark">📡</span> 유튜브 레이더
     </button>
     <button class="btn-ghost btn-sm" id="run">지금 수집</button>
@@ -560,7 +674,15 @@
 
 <script>
 const $ = (s) => document.querySelector(s)
-let tab = 'dig'
+// 탭은 네 칸뿐이다 — 브리핑(오늘 볼 것) · 광산(캐는 곳) · 후보함(담은 것) · 관리(설정·기록).
+// 예전 탭 7개 중 발굴·신작·HOT 은 광산 안의 '갱도' 로, 추적 중·주간은 관리 안의 섹션으로 들어갔다.
+let tab = 'brief'
+let shaft = 'dig' // 광산 갱도: dig(묵은 검증) / fresh(신작) / hot / discover(급상승·설정 시에만)
+// 신작은 채널이 올린 것을 전부 받아 오므로 그대로 두면 목록이 잡음이 된다.
+// 기본은 '신호만' — Low 등급을 감추고 채널당 상위 몇 건만 편다.
+let freshSignalOnly = true
+const FRESH_PER_CHANNEL = 3
+const BRIEF_ROWS = 5 // 브리핑에 미리 펴 두는 예심 행 수 (나머지는 후보함에서)
 let settings = { trendingOn: false, prospectOn: false, channels: [], groups: [] }
 let digPeriod = 'all'
 let digChannel = 'all'
@@ -794,22 +916,22 @@ function wireReset(panel) {
 
 // 모바일에서 1줄(썸네일+제목) / 2줄(지표+버튼)로 접히도록 지표·버튼을 .tools 로 묶는다.
 // 묶어 두지 않으면 폭이 좁아질 때 형제들이 제각각 줄바꿈해 썸네일만 한 줄을 차지한다.
+// 기본 노출은 [⭐] [💡 아이디어로] [⋯] 세 개뿐이다.
+// 🔎 관련·💬 댓글처럼 '한 건을 파고들 때만' 쓰는 것은 [⋯] 안쪽 상세 줄로 내렸다.
 function videoRow(v, extra = '', opts = {}) {
   const star = opts.tools ?? `
     <button class="star ${Number(v.pick_level ?? 0) >= 1 ? 'star-on' : ''}" data-star="${esc(v.video_id)}"
             aria-label="후보로 담기" title="후보로 담기 (목록에서 빠집니다)">★</button>`
-  // noRel — 🔎 관련은 그 영상 주제로 국내를 다시 검색하는 버튼이다. 해외 광맥 목록처럼
-  // '수확만 하는' 자리에서는 뺀다 (거기서 할 일은 ⭐ 담기와 💡 아이디어로 두 가지뿐).
-  const rel = opts.noRel ? '' : `
-    <button class="btn-ghost btn-sm rel" data-rel="${esc(v.video_id)}" title="관련 주제">
-      🔎<span class="lbl"> 관련</span></button>`
-  const tools = opts.noTools ? '' : `${star}${rel}`
+  const idea = opts.idea ? ideaButton(v) : ''
+  // noMore — 추적 중·급상승처럼 지표를 안 붙이는 목록에는 펼칠 것이 없다
+  const more = opts.noMore ? '' : moreButton(v)
+  const tools = opts.noTools ? '' : `${star}${idea}${more}`
   return `<div class="row row-v">
     <img class="thumb" loading="lazy" src="https://img.youtube.com/vi/${esc(v.video_id)}/mqdefault.jpg" alt="">
     <div class="meta">
       <a class="title" href="https://www.youtube.com/watch?v=${esc(v.video_id)}" target="_blank" rel="noopener noreferrer">${isGlobal(v) ? '🌍 ' : ''}${esc(v.title)}</a>
       <div class="sub">
-        <span class="ch">${esc(v.channel_title || '')}</span>
+        <span class="ch">${esc(v.channel_title || '')}${vitalityMark(v)}</span>
         <span title="${fmt(v.views ?? v.latest)}">조회 ${shortNum(v.views ?? v.latest)}</span>
         <span>${day(v.published_at)}</span>
         ${v.duration_sec != null ? `<span>${durLabel(v.duration_sec)}</span>` : ''}
@@ -818,8 +940,39 @@ function videoRow(v, extra = '', opts = {}) {
     </div>
     <div class="tools">${extra}${tools}</div>
   </div>
+  ${opts.noMore ? '' : detailStrip(v, opts)}
   <div class="relpanel hide" data-panel="${esc(v.video_id)}"></div>
   <div class="cmtpanel hide" data-cpanel="${esc(v.video_id)}"></div>`
+}
+
+function moreButton(v) {
+  return `<button class="btn-ghost btn-sm more" data-more="${esc(v.video_id)}"
+    aria-expanded="false" title="상세 지표와 추가 동작 펼치기">⋯</button>`
+}
+
+// noRel — 🔎 관련은 그 영상 주제로 국내를 다시 검색하는 버튼이다. 해외 광맥 목록처럼
+// '수확만 하는' 자리에서는 뺀다 (거기서 할 일은 ⭐ 담기와 💡 아이디어로 두 가지뿐).
+function relButton(v) {
+  return `<button class="btn-ghost btn-sm rel" data-rel="${esc(v.video_id)}" title="관련 주제">
+    🔎<span class="lbl"> 관련</span></button>`
+}
+
+// [⋯] 로 펼치는 줄. 1열에서 뺀 지표와 기본 노출에서 뺀 동작이 함께 들어간다.
+// 💬 댓글은 원래 후보함에서만 쓰던 버튼이라 (수집이 1유닛씩 든다) 그 자리에서만 켠다.
+function detailStrip(v, opts = {}) {
+  const bits = [
+    `<span class="m" title="${reachTip(v)}">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}${gradeTag(v.grade?.reach)}</span>`,
+    evergreenChip(v),
+    saturationChip(v),
+    v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : '',
+    v.debate ? '<span class="m m-debate">🗣️ 토론형</span>' : '',
+    trendChip(v)
+  ].filter(Boolean).join('')
+  const acts = `${opts.noRel ? '' : relButton(v)}${opts.comments ? commentButton(v) : ''}`
+  return `<div class="rowdet hide" data-det="${esc(v.video_id)}">
+    <span class="detm">${bits}</span>
+    ${acts ? `<span class="det-acts">${acts}</span>` : ''}
+  </div>`
 }
 
 // 일평균 조회수 + 최근 N일 증가량. 스냅샷이 2개 미만이면 증가량만 '측정 중'.
@@ -839,6 +992,15 @@ function saturationChip(v) {
   return ''
 }
 
+// 1열용 — 낱말을 떼고 ✅/⚠️ 만 남긴다. 뜻은 title 로 읽는다.
+// 목록을 훑을 때 필요한 건 '비었나 붐비나' 뿐이고, 몇 개인지는 [⋯] 에서 본다.
+function saturationMark(v) {
+  if (v.saturation == null) return ''
+  if (v.saturation === 0) return '<span class="m m-fresh" title="최근 이 주제를 다룬 채널이 없습니다">✅</span>'
+  if (v.saturation >= 2) return `<span class="m m-sat" title="최근 ${v.saturation}개 채널이 이 주제를 다뤘습니다">⚠️</span>`
+  return ''
+}
+
 // 배수는 소수 1자리, 100 이상은 축약(x1.2천)해 뱃지 폭을 일정하게 둔다
 const ratio = (n) => (Number(n) >= 100 ? shortNum(n) : Number(n || 0).toFixed(1))
 
@@ -851,6 +1013,7 @@ function trendTip(v) {
   return `${base}\n최근 ${shortNum(v.vitality_recent)} vs 이전 ${shortNum(v.vitality_prev)}${n}`
 }
 
+// 숫자까지 보이는 상세판 — [⋯] 안쪽에서만 쓴다
 function trendChip(v) {
   if (v.dead_channel) {
     return `<span class="m m-warn" title="${trendTip(v)}">⚠️ 쇠락 ${Number(v.vitality).toFixed(2)}x</span>`
@@ -858,6 +1021,14 @@ function trendChip(v) {
   if (v.rising_channel) {
     return `<span class="m m-good" title="${trendTip(v)}">📈 상승 ${Number(v.vitality).toFixed(2)}x</span>`
   }
+  return ''
+}
+
+// 활력은 영상이 아니라 채널의 성질이다. 영상 행의 지표 줄에 섞여 있으면
+// 이 영상이 쇠락했다는 말처럼 읽힌다 — 채널명 뒤에만 작게 붙인다.
+function vitalityMark(v) {
+  if (v.dead_channel) return `<span class="vm" title="${trendTip(v)}">⚠️</span>`
+  if (v.rising_channel) return `<span class="vm" title="${trendTip(v)}">📈</span>`
   return ''
 }
 
@@ -874,20 +1045,35 @@ function reachTip(v) {
   return `${base}\n체급 ${v.tier_label}${pct}`
 }
 
+// 등급을 뱃지 바탕색으로 옮긴다. 숫자만 보고는 x3.2 가 좋은 값인지 알 수 없는데,
+// 색이 있으면 훑는 것만으로 걸러진다. Normal 은 색을 주지 않는다 (평범한 게 기본값이라).
+const GRADE_TONE = { great: 'm-gr-great', low: 'm-gr-low' }
+const gradeTone = (kind) => GRADE_TONE[kind] ?? ''
+
+function multipleChip(v) {
+  const g = v.grade?.multiple
+  return `<span class="m ${gradeTone(g)}" title="채널·형식별 조회수 중앙값 대비 배율${
+    g ? ` · 지금 목록에서 ${GRADE_LABEL[g]}` : ''}">x${ratio(v.multiple)}${gradeTag(g)}</span>`
+}
+
+function engageChip(v) {
+  const g = v.grade?.engage
+  return `<span class="m ${gradeTone(g)}" title="(좋아요 + 댓글×3) / 조회수${
+    g ? ` · 지금 목록에서 ${GRADE_LABEL[g]}` : ''}">참여 ${(v.engage ?? 0).toFixed(1)}%${gradeTag(g)}</span>`
+}
+
+// 1열 — '이 영상을 볼까 말까' 를 정하는 데 필요한 것만 남긴다.
+//   배율(얼마나 터졌나) · 참여(사람이 반응했나) · 포화도(자리가 비었나) · 🅐(내 채널에 올릴 수 있나)
+// 침투·일평균·최근7일·토론형·진한반응·활력 상세는 [⋯] 상세 줄로 내렸다.
 // extra 는 .metrics 안쪽에 넣는다. 밖에 두면 .tools 의 min-content 가 커져
 // 옆 칸(제목)을 밀어내 0 으로 만든다 (768px 에서 실제로 그렇게 깨졌다).
 function metricBadges(v, extra = '') {
   return `<span class="metrics">
     ${extra}
     ${sensitiveMark(v)}
-    <span class="m" title="채널·형식별 조회수 중앙값 대비 배율">x${ratio(v.multiple)}${gradeTag(v.grade?.multiple)}</span>
-    <span class="m" title="${reachTip(v)}">침투 ${v.reach == null ? '—' : v.reach.toFixed(2)}${gradeTag(v.grade?.reach)}</span>
-    <span class="m" title="(좋아요 + 댓글×3) / 조회수">참여 ${(v.engage ?? 0).toFixed(1)}%${gradeTag(v.grade?.engage)}</span>
-    ${v.hot_engage ? '<span class="m m-hot">💬 진한반응</span>' : ''}
-    ${v.debate ? '<span class="m m-debate">🗣️ 토론형</span>' : ''}
-    ${evergreenChip(v)}
-    ${saturationChip(v)}
-    ${trendChip(v)}
+    ${multipleChip(v)}
+    ${engageChip(v)}
+    ${saturationMark(v)}
   </span>`
 }
 
@@ -1214,14 +1400,8 @@ function conceptTags(v) {
   </div>`
 }
 
-// 발굴 탭 위의 알림 — 기계가 걸러 둔 것이 밀려 있으면 후보함으로 보낸다.
-// 건수는 상태바가 60초마다 읽어 온 값을 그대로 쓴다 (여기서 또 부르지 않는다).
-function auditionBadge() {
-  const n = lastStatus?.audition_pending ?? 0
-  if (!n) return ''
-  return `<div class="notice notice-go" id="audition-go">
-    🤖 예심 통과 <b>${fmt(n)}건</b>이 검토를 기다리고 있어요 — 후보함에서 보기 →</div>`
-}
+// (예전 발굴 탭 위에 있던 '예심 N건 대기' 알림은 없앴다 — 📥 브리핑이 그 자리를
+//  대신하고, 거기서는 알림 대신 실제 행을 펴서 바로 처리할 수 있다.)
 
 // 🤖 예심 통과 행의 버튼 — 승격은 내 후보로, 킵은 보류 칸으로, 제외는 다시 안 올라온다.
 // 킵 칸에서는 킵 대신 '대기로' 를 둔다 (잘못 눌렀을 때 되돌리는 길).
@@ -1414,6 +1594,17 @@ function wireRows(panel) {
     b.onclick = () => toggleRelated(panel, b.dataset.rel)
   })
 
+  // [⋯] — 그 행의 상세 줄만 여닫는다. 목록을 다시 그리지 않으므로 스크롤이 튀지 않는다.
+  panel.querySelectorAll('[data-more]').forEach((b) => {
+    b.onclick = () => {
+      const box = panel.querySelector(`[data-det="${CSS.escape(b.dataset.more)}"]`)
+      if (!box) return
+      const closed = box.classList.toggle('hide')
+      b.setAttribute('aria-expanded', String(!closed))
+      b.title = closed ? '상세 지표와 추가 동작 펼치기' : '상세 접기'
+    }
+  })
+
   // 🤖 예심 통과 — 승격/제외. 둘 다 그 자리에서 행이 사라진다.
   panel.querySelectorAll('[data-promote]').forEach((b) => {
     b.onclick = async () => {
@@ -1524,14 +1715,308 @@ function drawRelated(box, panel, videoId, data) {
 
 const BADGE_CLASS = { short: 'b-short', mid: 'b-mid', long: 'b-long', pending: 'b-pending' }
 
+// ---------------------------------------------------------------- 탭 · 갱도 이동
+
+// 브리핑의 "전체 보기 →" 와 갱도 칩이 함께 쓴다. 탭을 옮기면 위로 올려 준다 —
+// 아래쪽을 보다 넘어가면 새 화면의 한가운데에 떨어져 무슨 화면인지 모른다.
+function goTab(next, nextShaft) {
+  tab = next
+  if (nextShaft) shaft = nextShaft
+  window.scrollTo({ top: 0, behavior: 'smooth' })
+  renderTabs()
+  render()
+}
+
+// 광산 갱도 — 예전 발굴·신작·HOT 탭이 여기로 들어왔다.
+// 급상승은 설정을 켠 사람만 쓰던 탭이라, 켜져 있을 때만 칩이 하나 더 붙는다.
+function shaftDefs() {
+  return [
+    ['dig', '💎 묵은 검증', '게시 6개월~3년 중 배율이 터진 영상'],
+    ['fresh', '📡 신작', '감시 채널이 최근 30일에 올린 영상'],
+    ['hot', '🔥 HOT', '감시망 밖 트렌드 — 뜨는 주제·추천 채널·해외 광맥·휴면 광산'],
+    ...(settings.trendingOn ? [['discover', '🔥 급상승', '유튜브 인기 급상승(mostPopular) 수집분']] : [])
+  ]
+}
+
+function shaftBar() {
+  return `<div class="shafts" role="group" aria-label="갱도">
+    ${shaftDefs().map(([k, t, tip]) => `<button class="shaft ${shaft === k ? 'shaft-on' : ''}"
+      data-shaft="${k}" title="${esc(tip)}">${t}</button>`).join('')}
+  </div>`
+}
+
+function wireShafts(panel) {
+  panel.querySelectorAll('[data-shaft]').forEach((b) => {
+    b.onclick = () => { shaft = b.dataset.shaft; render() }
+  })
+}
+
+const inShaft = (s) => tab === 'mine' && shaft === s
+
+// ---------------------------------------------------------------- 📥 브리핑
+// 들어오자마자 '오늘 뭘 하면 되는지' 만 본다. 목록을 다시 보여 주는 자리가 아니라,
+// 각 칸이 해당 탭으로 보내는 표지판이다.
+
+const WEEK_MS = 7 * 864e5
+
+// '이번 주 주목' — 이번 주에 담은 것 중 배율 상위 3. 이번 주에 담은 게 없으면
+// 후보함 전체에서 상위 3 을 보여 주고 그렇다고 밝힌다 (빈 칸으로 두면 후보함을 잊는다).
+function briefWatch(rows) {
+  const fresh = rows.filter((v) => v.starred_at && Date.now() - new Date(v.starred_at).getTime() < WEEK_MS)
+  const pool = fresh.length ? fresh : rows
+  return {
+    note: fresh.length ? '이번 주 담은 것 중 배율 상위' : '이번 주 담은 게 없어 후보함 전체 상위',
+    rows: [...pool].sort((a, b) => (Number(b.multiple) || 0) - (Number(a.multiple) || 0)).slice(0, 3)
+  }
+}
+
+function briefHotLines(h) {
+  const seen = h.last_prospect_at ? day(h.last_prospect_at) : '아직 없음'
+  return `
+    🔥 지금 뜨는 주제 <b>${fmt(h.trending?.length ?? 0)}건</b>
+      <span class="muted">최근 90일 · 배율·침투 상위</span><br>
+    📺 추천 채널 <b>${fmt(h.channels?.length ?? 0)}개</b> ·
+      🌍 해외 광맥 <b>${fmt(h.global?.length ?? 0)}건</b><br>
+    💀 휴면 광산 <b>${fmt(h.dormant?.length ?? 0)}개</b> ·
+      마지막 탐사 <b>${esc(seen)}</b>`
+}
+
+// ---------------------------------------------------------------- 📡 신작 걸러내기
+// 신작은 감시 채널이 올린 것을 전부 받아 온다. 그대로 펴 두면 한 채널이 하루에 다섯 개를
+// 올린 날 목록이 그 채널로 덮여, 다른 채널의 신호가 묻힌다.
+// 기본값('신호만')이 하는 일은 둘뿐이다 —
+//   ① 배율 등급 Low(그 채널 평소보다 못 터진 영상)를 감춘다
+//   ② 채널당 ${FRESH_PER_CHANNEL}건까지만 펴고 나머지는 그 자리에 접어 둔다
+// 발굴 갱도는 이미 점수순이라 이 체를 걸지 않는다.
+function signalToggle() {
+  return `<div class="fmt" role="group" aria-label="신작 걸러내기">
+    <button class="fmt-b ${freshSignalOnly ? 'fmt-on' : ''}" data-sig="1"
+      title="Low 등급을 감추고 채널당 ${FRESH_PER_CHANNEL}건까지만 폅니다">신호만</button>
+    <button class="fmt-b ${freshSignalOnly ? '' : 'fmt-on'}" data-sig="0"
+      title="받은 것을 그대로 다 보여줍니다">전부</button>
+  </div>`
+}
+
+function wireSignalToggle(panel) {
+  panel.querySelectorAll('[data-sig]').forEach((b) => {
+    b.onclick = () => { freshSignalOnly = b.dataset.sig === '1'; render() }
+  })
+}
+
+function freshSieve(rows) {
+  const rowHtml = (v) => videoRow(v, metricBadges(v), { idea: true })
+  if (!freshSignalOnly) return { html: rows.map(rowHtml).join(''), hiddenLow: 0, folded: 0 }
+
+  const kept = rows.filter((v) => v.grade?.multiple !== 'low')
+  const out = []
+  const seen = new Map() // 채널별로 몇 번째인지
+  const over = new Map() // 채널별로 접어 둘 나머지
+  for (const v of kept) {
+    const key = v.channel_id || v.channel_title || '?'
+    const n = (seen.get(key) ?? 0) + 1
+    seen.set(key, n)
+    if (n <= FRESH_PER_CHANNEL) {
+      out.push(rowHtml(v))
+      // 마지막으로 편 행의 자리를 기억해 둔다 — 접은 묶음은 그 바로 아래에 놓는다
+      if (n === FRESH_PER_CHANNEL) {
+        over.set(key, { at: out.length - 1, label: v.channel_title || '', rows: [] })
+      }
+    } else {
+      over.get(key).rows.push(v)
+    }
+  }
+  // 뒤에서부터 끼워 넣어야 앞쪽 자리 번호가 밀리지 않는다
+  const folds = [...over.values()].filter((o) => o.rows.length).sort((a, b) => b.at - a.at)
+  folds.forEach((o) => out.splice(o.at + 1, 0, `
+    <details class="more-ch">
+      <summary>이 채널 ${fmt(o.rows.length)}건 더 <span class="muted">${esc(o.label)}</span></summary>
+      ${o.rows.map(rowHtml).join('')}
+    </details>`))
+
+  return {
+    html: out.join(''),
+    hiddenLow: rows.length - kept.length,
+    folded: folds.reduce((a, o) => a + o.rows.length, 0)
+  }
+}
+
+// ---------------------------------------------------------------- ⚙️ 관리 안쪽 섹션
+// 추적 중·주간 리포트는 예전에 각자 탭이었다. 매일 볼 것은 아니라 관리 탭 안에 접어 두고,
+// 실제로 펼 때만 부른다 — 주간 리포트의 '열 때만 계산한다' 는 성질도 그대로 지켜진다.
+
+function lazySection(id, title, note) {
+  return `<details class="sec-box" data-lazy="${id}">
+    <summary>${title} <span class="muted">${esc(note)}</span></summary>
+    <div class="sec-body"><p class="muted">불러오는 중…</p></div>
+  </details>`
+}
+
+// 섹션마다 자기 토글을 가진다 — 두 섹션을 동시에 펴도 id 가 겹치지 않는다
+function pickedToggleFor(kind) {
+  return `<div class="filters"><button class="btn-ghost btn-sm ${showPicked ? 'fmt-on' : ''}"
+    data-picked-sec="${kind}" title="담아 둔 영상까지 함께 보기">⭐ 포함 보기</button></div>`
+}
+
+function wireSectionPicked(box) {
+  box.querySelectorAll('[data-picked-sec]').forEach((b) => {
+    b.onclick = async () => {
+      showPicked = !showPicked
+      const kind = b.dataset.pickedSec
+      box.innerHTML = '<p class="muted">불러오는 중…</p>'
+      try { await LAZY[kind](box) } catch (e) { box.innerHTML = `<p class="err">${esc(e.message)}</p>` }
+    }
+  })
+}
+
+async function fillTracking(box) {
+  const rows = await api(`/api/tracking?${pq()}`)
+  box.innerHTML = `
+    ${pickedToggleFor('tracking')}
+    <p class="muted" style="margin:0 0 8px" data-count="${rows.length}">${rows.length}건</p>
+    ${rows.length
+      ? rows.map((v) => videoRow(v, `
+          ${v.delta != null ? `<span class="delta">+${fmt(v.delta)}</span>` : ''}
+          <span class="badge ${BADGE_CLASS[v.kind]}">${esc(v.badge)}</span>
+        `, { noMore: true })).join('')
+      : '<p class="empty">추적 중인 영상이 없어요.</p>'}`
+  wireRows(box)
+  wireSectionPicked(box)
+}
+
+async function fillWeekly(box) {
+  const w = await api(`/api/weekly?${pq()}`)
+  const list = (rows, empty) => rows.length
+    ? rows.map((v) => videoRow(v, metricBadges(v), { idea: true })).join('')
+    : `<p class="empty">${empty}</p>`
+  box.innerHTML = `
+    ${pickedToggleFor('weekly')}
+    <p class="muted" style="margin-top:0">
+      ${day(w.since)} ~ 오늘 (7일) · ⭐ 전체 ${fmt(w.starred.total)}건
+      <b>이번 주 +${fmt(w.starred.this_week)}</b>
+    </p>
+    <h3 class="sec">🚀 신작 성과 상위 <span class="muted">${w.top_fresh.length}건 · 배율순</span></h3>
+    ${list(w.top_fresh, '지난 7일에 올라온 신작이 없어요.')}
+    <h3 class="sec">💎 새로 발굴된 배율 5배+ <span class="muted">${w.new_digs.length}건</span></h3>
+    ${list(w.new_digs, '이번 주에 새로 걸린 5배 이상 영상이 없어요.')}
+    <p class="muted" style="margin-top:14px">
+      펼칠 때만 계산합니다 (자동 실행 없음 · 할당량 0).
+      원본 JSON 은 <code>/api/weekly</code> 에서 그대로 받을 수 있어요.
+    </p>`
+  wireRows(box)
+  wireSectionPicked(box)
+}
+
+const LAZY = { tracking: fillTracking, weekly: fillWeekly }
+
+function wireLazy(panel) {
+  panel.querySelectorAll('[data-lazy]').forEach((d) => {
+    d.ontoggle = async () => {
+      if (!d.open || d.dataset.done) return
+      d.dataset.done = '1' // 접었다 다시 펴도 또 부르지 않는다
+      const box = d.querySelector('.sec-body')
+      try {
+        await LAZY[d.dataset.lazy](box)
+      } catch (e) {
+        d.dataset.done = '' // 실패했으면 다음에 다시 시도할 수 있어야 한다
+        box.innerHTML = `<p class="err">${esc(e.message)}</p>`
+      }
+    }
+  })
+}
+
+// 마지막 수집·할당량은 늘 적고, 경고는 이상할 때만 붙인다.
+// 평소에도 빨간 글자가 있으면 진짜 이상할 때 눈에 안 들어온다.
+function briefStatusLine(s) {
+  if (!s) return '<p class="blines bstat muted">상태를 읽지 못했어요.</p>'
+  const at = s.last_run
+    ? new Date(s.last_run.at).toLocaleString('ko-KR',
+        { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' })
+    : '없음'
+  const pct = Math.min(100, Math.round((s.units_today / s.quota_limit) * 100))
+  const warn = []
+  if (s.last_run?.aborted === 'quota') {
+    warn.push('<b class="wa">할당량 초과로 중단</b> <span class="muted">태평양 자정 리셋 후 재시도</span>')
+  } else if (pct >= 70) {
+    warn.push(`<b class="wa">할당량 ${pct}% 사용</b>`)
+  }
+  if (s.last_run?.errors) warn.push(`<b class="wa">최근 수집 오류 ${fmt(s.last_run.errors)}건</b>`)
+  return `<p class="blines bstat">⏱ 마지막 수집 <b>${esc(at)}</b> ·
+    ⚡ 오늘 <b>${fmt(s.units_today)}</b>/${fmt(s.quota_limit)}유닛${
+      warn.length ? ` · ${warn.join(' · ')}` : ''}</p>`
+}
+
 async function render() {
   const panel = $('#panel')
   panel.innerHTML = skeleton()
+  // 급상승을 끄면 그 갱도가 사라진다. 거기 서 있었다면 기본 갱도로 데려온다
+  // (없는 갱도에 남아 있으면 아무 분기에도 안 걸려 관리 화면이 튀어나온다).
+  if (tab === 'mine' && !shaftDefs().some(([k]) => k === shaft)) shaft = 'dig'
   try {
-    if (tab === 'dig') {
+    if (tab === 'brief') {
+      // 세 곳을 한 번에 읽는다. 하나가 실패해도 나머지 칸은 보여야 하므로 각자 삼킨다.
+      const [picks, hot, status] = await Promise.all([
+        api('/api/picks?level=all&target=all').catch(() => null),
+        api(`/api/hot?${pq()}`).catch(() => null),
+        api('/api/status').catch(() => null)
+      ])
+      if (status) lastStatus = status
+
+      // 검토 대기 = 일반 예심 + 🅐 전용. 킵(보류)은 이미 한 번 판단한 것이라 뺀다.
+      const pending = [...(picks?.auto ?? []), ...(picks?.sensitive ?? [])]
+      const keptOn = picks?.kept_ready ?? false
+      const watch = briefWatch(picks?.rows ?? [])
+      const hotOn = !!hot && Boolean((hot.trending?.length ?? 0) || (hot.channels?.length ?? 0)
+        || (hot.global?.length ?? 0) || (hot.dormant?.length ?? 0))
+
+      panel.innerHTML = `
+        ${pending.length ? `
+          <div class="bcard">
+            <div class="bhead">
+              <h3>🤖 예심 통과 <span class="muted">검토 대기 ${fmt(pending.length)}건</span></h3>
+              <button class="go" data-go="picks">전체 보기 →</button>
+            </div>
+            ${pending.slice(0, BRIEF_ROWS).map((v) => videoRow(
+                v, metricBadges(v), { tools: auditionTools(v, { keptOn }), idea: true }
+              )).join('')}
+            ${pending.length > BRIEF_ROWS ? `<p class="muted" style="margin:10px 0 0">
+              나머지 ${fmt(pending.length - BRIEF_ROWS)}건은 후보함에서 이어서 봅니다.</p>` : ''}
+          </div>` : ''}
+
+        ${watch.rows.length ? `
+          <div class="bcard">
+            <div class="bhead">
+              <h3>⭐ 이번 주 주목 <span class="muted">${esc(watch.note)}</span></h3>
+              <button class="go" data-go="picks">전체 보기 →</button>
+            </div>
+            ${watch.rows.map((v) => videoRow(
+                v, metricBadges(v, targetChips(v)), { tools: pickTools(v), idea: true, comments: true }
+              )).join('')}
+          </div>` : ''}
+
+        ${hotOn ? `
+          <div class="bcard">
+            <div class="bhead">
+              <h3>🔥 HOT 최근 탐사</h3>
+              <button class="go" data-go="hot">전체 보기 →</button>
+            </div>
+            <p class="blines">${briefHotLines(hot)}</p>
+          </div>` : ''}
+
+        ${pending.length || watch.rows.length || hotOn ? '' : '<p class="quiet">오늘은 조용해요 ✅</p>'}
+
+        ${briefStatusLine(status)}
+      `
+      panel.querySelectorAll('[data-go]').forEach((b) => {
+        b.onclick = () => (b.dataset.go === 'hot' ? goTab('mine', 'hot') : goTab(b.dataset.go))
+      })
+      wireRows(panel)
+      return
+    }
+
+    if (inShaft('dig')) {
       const rows = await api(`/api/dig?period=${digPeriod}&sort=${digSort}&${filterQuery()}`)
       panel.innerHTML = `
-        ${auditionBadge()}
+        ${shaftBar()}
         <div class="filters">
           ${filterBar(`
             <select id="f-sort">
@@ -1547,17 +2032,16 @@ async function render() {
           ${pickedToggle()}
           <button class="btn-ghost btn-sm" id="csv" ${rows.length ? '' : 'disabled'}>⬇️ CSV</button>
         </div>
-        ${rows.length ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
+        ${rows.length ? rows.map((v) => videoRow(v, metricBadges(v), { idea: true })).join('')
           : emptyWithReset(
               '조건에 맞는 영상이 없어요',
               '백카탈로그가 더 쌓이면 나타납니다. 배율은 채널·형식당 영상 5개 이상 모여야 계산됩니다.')}
       `
+      wireShafts(panel)
       wireFilters()
       wireRows(panel)
       wireReset(panel)
       wirePickedToggle()
-      const go = $('#audition-go')
-      if (go) go.onclick = () => { tab = 'picks'; renderTabs(); render() }
       // 화면에 그려진 그대로(=현재 필터·정렬 결과) 내보낸다
       $('#csv').onclick = () => downloadCsv(`youtube-radar-dig-${todayStamp()}.csv`, toCsv(rows))
       return
@@ -1580,8 +2064,8 @@ async function render() {
         ${auto.length
           ? auto.map((v) => videoRow(
               v,
-              metricBadges(v) + ideaButton(v),
-              { tools: auditionTools(v, { keptOn }) }
+              metricBadges(v),
+              { tools: auditionTools(v, { keptOn }), idea: true }
             )).join('')
           : '<p class="muted" style="margin:0 0 10px">대기 중인 예심 통과분이 없어요. 수집이 끝날 때마다 자동으로 채워집니다.</p>'}
 
@@ -1592,16 +2076,16 @@ async function render() {
           </p>
           ${sensitive.map((v) => videoRow(
             v,
-            metricBadges(v, sensitiveBadge(v)) + ideaButton(v),
-            { tools: auditionTools(v, { keptOn }) }
+            metricBadges(v, sensitiveBadge(v)),
+            { tools: auditionTools(v, { keptOn }), idea: true }
           )).join('')}` : ''}
 
         ${kept.length ? `
           <h3 class="sec">🤔 킵 <span class="muted">(다시 볼 것) · ${kept.length}건</span></h3>
           ${kept.map((v) => videoRow(
             v,
-            metricBadges(v, sensitiveBadge(v)) + ideaButton(v),
-            { tools: auditionTools(v, { inKept: true, keptOn }) }
+            metricBadges(v, sensitiveBadge(v)),
+            { tools: auditionTools(v, { inKept: true, keptOn }), idea: true }
           )).join('')}` : ''}
 
         <h3 class="sec">⭐ 내 후보</h3>
@@ -1625,10 +2109,13 @@ async function render() {
         ${rows.length
           ? rows.map((v) => videoRow(
               v,
-              metricBadges(v, targetChips(v)) + commentButton(v) + ideaButton(v),
-              { tools: pickTools(v), metaExtra: conceptReady ? conceptTags(v) : '' }
+              metricBadges(v, targetChips(v)),
+              {
+                tools: pickTools(v), idea: true, comments: true,
+                metaExtra: conceptReady ? conceptTags(v) : ''
+              }
             )).join('')
-          : stateBox('여기 담긴 영상이 없어요', '발굴·신작 목록에서 ★ 을 누르면 이리로 옵니다.')}
+          : stateBox('여기 담긴 영상이 없어요', '💎 광산에서 ★ 을 누르면 이리로 옵니다.')}
       `
       panel.querySelectorAll('[data-plevel]').forEach((b) => {
         b.onclick = () => { pickLevel = b.dataset.plevel; render() }
@@ -1640,56 +2127,45 @@ async function render() {
       return
     }
 
-    if (tab === 'fresh') {
+    if (inShaft('fresh')) {
       const rows = await api(`/api/fresh?${filterQuery()}`)
+      const sieve = freshSieve(rows)
+      const noise = [
+        sieve.hiddenLow ? `Low 등급 ${fmt(sieve.hiddenLow)}건 숨김` : '',
+        sieve.folded ? `채널당 ${FRESH_PER_CHANNEL}건 초과 ${fmt(sieve.folded)}건 접힘` : ''
+      ].filter(Boolean).join(' · ')
+
       panel.innerHTML = `
-        <div class="filters">${filterBar()}
+        ${shaftBar()}
+        <div class="filters">${filterBar(signalToggle())}
           <span class="muted" data-count="${rows.length}">${rows.length}건</span>
           ${pickedToggle()}
         </div>
-        ${rows.length
-          ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
-          : emptyWithReset('최근 30일 영상이 없어요', '감시 채널이 새 영상을 올리면 여기에 쌓입니다.')}
+        ${freshSignalOnly && noise
+          ? `<p class="muted" style="margin:0 0 10px">🔇 ${noise} — 다 보려면 위 <b>전부</b>를 누르세요.</p>`
+          : ''}
+        ${sieve.html || (rows.length
+          ? stateBox('신호로 볼 만한 신작이 없어요',
+              `받은 ${rows.length}건이 전부 Low 등급이라 감췄습니다. 위 [전부]를 누르면 다 보입니다.`)
+          : emptyWithReset('최근 30일 영상이 없어요', '감시 채널이 새 영상을 올리면 여기에 쌓입니다.'))}
       `
+      wireShafts(panel)
       wireFilters()
+      wireSignalToggle(panel)
       wireRows(panel)
       wireReset(panel)
       wirePickedToggle()
       return
     }
 
-    if (tab === 'weekly') {
-      const w = await api(`/api/weekly?${pq()}`)
-      const list = (rows, empty) => rows.length
-        ? rows.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
-        : `<p class="empty">${empty}</p>`
-      panel.innerHTML = `
-        <div class="filters">${pickedToggle()}</div>
-        <p class="muted" style="margin-top:0">
-          ${day(w.since)} ~ 오늘 (7일) · ⭐ 전체 ${fmt(w.starred.total)}건
-          <b>이번 주 +${fmt(w.starred.this_week)}</b>
-        </p>
-        <h3 class="sec">🚀 신작 성과 상위 <span class="muted">${w.top_fresh.length}건 · 배율순</span></h3>
-        ${list(w.top_fresh, '지난 7일에 올라온 신작이 없어요.')}
-        <h3 class="sec">💎 새로 발굴된 배율 5배+ <span class="muted">${w.new_digs.length}건</span></h3>
-        ${list(w.new_digs, '이번 주에 새로 걸린 5배 이상 영상이 없어요.')}
-        <p class="muted" style="margin-top:14px">
-          이 탭은 열 때만 계산합니다 (자동 실행 없음 · 할당량 0).
-          원본 JSON 은 <code>/api/weekly</code> 에서 그대로 받을 수 있어요.
-        </p>
-      `
-      wireRows(panel)
-      wirePickedToggle()
-      return
-    }
-
-    if (tab === 'hot') {
+    if (inShaft('hot')) {
       const h = await api(`/api/hot?${pq()}`)
       const seen = h.last_prospect_at
         ? new Date(h.last_prospect_at).toLocaleDateString('ko-KR', { month: 'numeric', day: 'numeric' })
         : '아직 없음'
 
       panel.innerHTML = `
+        ${shaftBar()}
         <div class="filters">
           <button class="btn btn-sm" id="hot-go">🔥 지금 탐사 <span class="muted">(약 ${fmt(h.cost)}유닛)</span></button>
           <span class="muted">마지막 탐사 ${esc(seen)}</span>
@@ -1699,7 +2175,7 @@ async function render() {
 
         <h3 class="sec">🔥 지금 뜨는 주제 <span class="muted">최근 90일 · 배율·침투 상위 · 할당량 0</span></h3>
         ${h.trending.length
-          ? h.trending.map((v) => videoRow(v, metricBadges(v) + ideaButton(v))).join('')
+          ? h.trending.map((v) => videoRow(v, metricBadges(v), { idea: true })).join('')
           : '<p class="empty">최근 90일에 배율이 뜬 영상이 아직 없어요.</p>'}
 
         <h3 class="sec">📺 추천 채널 <span class="muted">감시망 밖 · 반복해서 광맥이 나온 채널</span></h3>
@@ -1720,7 +2196,7 @@ async function render() {
         </p>
         ${h.global.length
           ? h.global.map((v) => videoRow(
-              v, metricBadges(v, coverageChip(v)) + ideaButton(v), { noRel: true }
+              v, metricBadges(v, coverageChip(v)), { noRel: true, idea: true }
             )).join('')
           : '<p class="empty">해외 탐사 결과가 아직 없어요.</p>'}
 
@@ -1742,6 +2218,7 @@ async function render() {
           : '<p class="empty">아직 걸린 휴면 채널이 없어요. [🔥 지금 탐사]를 돌리면 판정합니다.</p>'}
       `
 
+      wireShafts(panel)
       wireRows(panel)
       wirePickedToggle()
       // 감시에 들어가면 국내 채널과 똑같이 신작·백카탈로그 수집 대상이 된다.
@@ -1809,7 +2286,7 @@ async function render() {
             })
             b.textContent = r.backlog_only ? '✅ 채굴 대기' : '✅ 감시 추가(신작 포함)'
             toast(panel, r.backlog_only
-              ? '다음 수집부터 과거 영상을 캐 옵니다 — 발굴 탭에 합류합니다.'
+              ? '다음 수집부터 과거 영상을 캐 옵니다 — 💎 묵은 검증 갱도에 합류합니다.'
               : 'backlog_only 컬럼이 없어 일반 감시로 넣었어요 (TODO-SQL.md 0-H).')
             if (r.group_error) toast(panel, `그룹 배정 실패 — ${r.group_error}`)
           } catch (e) {
@@ -1838,6 +2315,7 @@ async function render() {
       return
     }
 
+    // 탭 버튼이 없는 옛 화면. /api/radar 를 살려 두려고 분기만 남긴다.
     if (tab === 'radar') {
       const rows = await api(`/api/radar?${pq()}`)
       panel.innerHTML = `
@@ -1849,45 +2327,28 @@ async function render() {
           ? rows.map((v) => videoRow(v, `
               ${v.hits?.length ? `<span class="hits">${v.hits.map(esc).join(' · ')}</span>` : ''}
               <span class="badge b-score">${v.score}점</span>
-            `)).join('')
+            `, { noMore: true })).join('')
           : `<p class="empty">조건에 맞는 영상이 아직 없어요.
-               <b>⚙️ 감시 관리</b>에서 관심 키워드나 채널을 등록해 보세요.</p>`}
+               <b>⚙️ 관리</b>에서 관심 키워드나 채널을 등록해 보세요.</p>`}
       `
       wireRows(panel)
       wirePickedToggle()
       return
     }
 
-    if (tab === 'discover') {
+    if (inShaft('discover')) {
       const rows = await api(`/api/discover?${pq()}`)
       panel.innerHTML = `
+        ${shaftBar()}
         <div class="filters">
           <span class="muted" data-count="${rows.length}">${rows.length}건</span>
           ${pickedToggle()}
         </div>
         ${rows.length
-          ? rows.map((v) => videoRow(v)).join('')
+          ? rows.map((v) => videoRow(v, '', { noMore: true })).join('')
           : '<p class="empty">아직 수집된 영상이 없어요. [지금 수집]을 눌러 보세요.</p>'}
       `
-      wireRows(panel)
-      wirePickedToggle()
-      return
-    }
-
-    if (tab === 'tracking') {
-      const rows = await api(`/api/tracking?${pq()}`)
-      panel.innerHTML = `
-        <div class="filters">
-          <span class="muted" data-count="${rows.length}">${rows.length}건</span>
-          ${pickedToggle()}
-        </div>
-        ${rows.length
-          ? rows.map((v) => videoRow(v, `
-              ${v.delta != null ? `<span class="delta">+${fmt(v.delta)}</span>` : ''}
-              <span class="badge ${BADGE_CLASS[v.kind]}">${esc(v.badge)}</span>
-            `)).join('')
-          : '<p class="empty">추적 중인 영상이 없어요.</p>'}
-      `
+      wireShafts(panel)
       wireRows(panel)
       wirePickedToggle()
       return
@@ -1926,6 +2387,9 @@ async function render() {
       : '<span class="empty">없음</span>'
 
     panel.innerHTML = `
+      ${lazySection('weekly', '📊 주간 리포트', '지난 7일 요약 · 펼칠 때만 계산')}
+      ${lazySection('tracking', '📈 추적 중', '수집된 영상의 조회수 증가 추이')}
+
       <div class="notice">
         <b>API 할당량</b> — YouTube Data API는 하루 10,000 유닛입니다.
         채널 수집은 <b>업로드 재생목록 방식</b>이라 채널당 회당 <b>2~3유닛</b>만 씁니다
@@ -1964,7 +2428,7 @@ async function render() {
         일요일 저녁마다 감시망 밖(국내·해외)을 한 번 훑기 — 기본은 켜짐
       </label>
       <p class="muted">
-        검색 1건당 100유닛이라 주 1회만 돕니다. 급할 때는 <b>🔥 HOT</b> 탭의
+        검색 1건당 100유닛이라 주 1회만 돕니다. 급할 때는 <b>💎 광산 › 🔥 HOT</b> 갱도의
         <b>지금 탐사</b> 버튼을 쓰세요.
       </p>
 
@@ -2072,6 +2536,8 @@ async function render() {
         ${lastRun ? `최근 수집 ${new Date(lastRun.at).toLocaleString('ko-KR')} · 급상승 ${lastRun.trending}건 · 감시 ${lastRun.watches}건${lastRun.errors?.length ? ` · 오류 ${lastRun.errors.length}건` : ''}${lastRun.aborted === 'quota' ? ' · <b>할당량 초과로 중단 (다음 주기에 재시도)</b>' : ''}` : '아직 수집 기록이 없어요.'}
       </p>
     `
+
+    wireLazy(panel)
 
     const add = async (type, value) => {
       if (!value) return
@@ -2292,16 +2758,14 @@ async function refreshStatus() {
   }
 }
 
+// 탭은 네 개로 고정한다. 급상승처럼 설정에 따라 생기는 화면은 탭을 늘리지 않고
+// 광산 안의 갱도 칩으로 붙는다 (탭 줄이 다시 스크롤되기 시작하면 원점이다).
 function renderTabs() {
   const defs = [
-    ['dig', '💎 발굴', '묵은 검증 주제 — 게시 6개월~3년 중 배율이 터진 영상'],
-    ['picks', '🗂 후보함', '예심 통과분과 내가 담은 영상 (별은 여기로 모입니다)'],
-    ['fresh', '📡 신작', '감시 채널이 최근 30일에 올린 영상'],
-    ['weekly', '📊 주간', '지난 7일 요약 — 신작 성과와 새로 걸린 발굴'],
-    ['hot', '🔥 HOT', '감시망 밖 트렌드 — 뜨는 주제·추천 채널·해외 광맥'],
-    ...(settings.trendingOn ? [['discover', '🔥 급상승', '유튜브 인기 급상승(mostPopular) 수집분']] : []),
-    ['tracking', '📈 추적 중', '수집된 영상의 조회수 증가 추이'],
-    ['watches', '⚙️ 감시 관리', '채널·키워드·그룹과 수집 설정']
+    ['brief', '📥 브리핑', '오늘 볼 것만 — 검토 대기 · 주목 후보 · 탐사 요약 · 상태'],
+    ['mine', '💎 광산', '묵은 검증 · 신작 · HOT — 갱도 칩으로 골라 캡니다'],
+    ['picks', '⭐ 후보함', '예심 통과분과 내가 담은 영상 (별은 여기로 모입니다)'],
+    ['manage', '⚙️ 관리', '감시 대상·수집 설정 + 주간 리포트 · 추적 중']
   ]
   $('#tabs').innerHTML = defs
     .map(([k, t, tip]) => `<button class="tab ${tab === k ? 'tab-on' : ''}" data-tab="${k}"
@@ -2312,9 +2776,11 @@ function renderTabs() {
   })
 }
 
-// 로고 = 처음으로. 탭·정렬·필터를 기본값으로 되돌리고 목록과 상태바를 다시 읽는다.
+// 로고 = 처음으로. 탭·갱도·정렬·필터를 기본값으로 되돌리고 목록과 상태바를 다시 읽는다.
 $('#home').onclick = () => {
-  tab = 'dig'
+  tab = 'brief'
+  shaft = 'dig'
+  freshSignalOnly = true
   digSort = 'dig'
   digGroup = 'all'; digChannel = 'all'; digSubs = 'all'
   digFormat = 'long'; digPeriod = 'all'
