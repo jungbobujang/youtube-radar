@@ -11,7 +11,7 @@
 주요 화면: **📥 브리핑 · 💎 광산 · ⭐ 후보함 · ⚙️ 관리** — 탭 네 개
 (탭 이름에 마우스를 올리면 각 탭이 무엇을 보여 주는지 한 줄 설명이 뜹니다)
 
-공통 표준: [dev-standards.md](../dev-standards.md) 참조
+공통 개발 표준: [github.com/jungbobujang/dev-standards](https://github.com/jungbobujang/dev-standards)
 
 ---
 
